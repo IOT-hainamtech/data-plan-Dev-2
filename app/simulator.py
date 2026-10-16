@@ -2,6 +2,8 @@
 import json
 import os
 import random
+import ssl
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -11,7 +13,8 @@ import paho.mqtt.client as mqtt
 ORG = "demo"  # DEMO ONLY: must match nextGRP registry at integration time.
 SITE = "demo-site"
 HOST = os.getenv("MQTT_HOST", "mqtt")
-PORT = int(os.getenv("MQTT_PORT", "1883"))
+PORT = int(os.getenv("MQTT_PORT", "8883"))
+CA_FILE = os.getenv("MQTT_CA_FILE", "/run/mqtt/ca.crt")
 INTERVAL = max(1, int(os.getenv("SIM_INTERVAL", "10")))  # Short demo interval; S1 spec is 30–60 s.
 
 
@@ -24,13 +27,40 @@ class SimulatedDevice:
         self.device_id = device_id
         self.boot_id = uuid.uuid4().hex[:10]
         self.seq = 0
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"sim-{device_id}-{self.boot_id}")
+        self.connected = threading.Event()
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                  client_id=f"sim-{device_id}-{self.boot_id}")
+        prefix = device_id.replace("-", "")
+        self.client.username_pw_set(os.environ[f"{prefix}_MQTT_USERNAME"],
+                                    os.environ[f"{prefix}_MQTT_PASSWORD"])
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=CA_FILE)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        self.client.tls_set_context(context)
+        self.client.reconnect_delay_set(min_delay=1, max_delay=30)
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
         self.status_topic = self.topic("status")
         will_payload = self.message({}, state="offline", increment=False)
         self.client.will_set(self.status_topic, json.dumps(will_payload), qos=1, retain=True)
-        self.client.connect(HOST, PORT, keepalive=45)
+        self.client.connect_async(HOST, PORT, keepalive=45)
         self.client.loop_start()
-        self.publish("status", self.message({}, state="online"), retain=True)
+        if not self.connected.wait(timeout=20):
+            raise ConnectionError(f"MQTT connection timeout for {device_id}")
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            print(f"SIM {self.device_id} connection rejected: {reason_code}", flush=True)
+            return
+        self.connected.set()
+        self.publish("status", self.message({}, state="online"), retain=True, wait=False)
+        print(f"SIM {self.device_id} connected with TLS", flush=True)
+
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+        self.connected.clear()
+        if reason_code.is_failure:
+            print(f"SIM {self.device_id} disconnected; reconnecting: {reason_code}", flush=True)
 
     def topic(self, channel):
         return f"nw/v1/{ORG}/{SITE}/{self.device_id}/{channel}"
@@ -50,9 +80,12 @@ class SimulatedDevice:
             payload["event_id"] = f"{self.device_id}-{self.boot_id}-{self.seq}"
         return payload
 
-    def publish(self, channel, payload, retain=False):
+    def publish(self, channel, payload, retain=False, wait=True):
         info = self.client.publish(self.topic(channel), json.dumps(payload), qos=1, retain=retain)
-        info.wait_for_publish(timeout=10)
+        if wait:
+            info.wait_for_publish(timeout=10)
+        if wait and not info.is_published():
+            raise TimeoutError(f"MQTT QoS 1 publish timeout for {self.device_id}")
         print(f"SIM {self.device_id} {channel}: {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
 

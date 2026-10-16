@@ -1,0 +1,9 @@
+user data-plane
+topic read nw/v1/#
+topic write nw/internal/health
+
+user TH-001
+topic write nw/v1/demo/demo-site/TH-001/#
+
+user DR-001
+topic write nw/v1/demo/demo-site/DR-001/#

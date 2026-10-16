@@ -1,10 +1,8 @@
-"""Local nextWireless M1 ingestion prototype with PostgreSQL/TimescaleDB.
-
-NOT production-ready: broker TLS/ACL, live nextGRP sync and offline watchdog pending.
-"""
+"""nextWireless M1 ingestion with authenticated TLS MQTT transport."""
 import json
 import logging
 import os
+import ssl
 import threading
 import time
 from datetime import datetime, timezone
@@ -167,6 +165,28 @@ def on_connect(client, userdata, flags, reason_code, properties):
     LOG.info("MQTT connected, listening on %s", topic)
 
 
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+    if reason_code.is_failure:
+        LOG.warning("MQTT disconnected unexpectedly (%s); Paho will reconnect", reason_code)
+    else:
+        LOG.info("MQTT disconnected cleanly")
+
+
+def configure_mqtt_security(client):
+    username = os.environ["MQTT_USERNAME"]
+    password = os.environ["MQTT_PASSWORD"]
+    ca_file = os.environ["MQTT_CA_FILE"]
+    minimum = os.getenv("MQTT_TLS_MIN_VERSION", "1.2")
+    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ca_file)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.minimum_version = (ssl.TLSVersion.TLSv1_3 if minimum == "1.3"
+                               else ssl.TLSVersion.TLSv1_2)
+    client.tls_set_context(context)
+    client.username_pw_set(username, password)
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+
+
 def on_message(client, userdata, message):
     try:
         body = json.loads(message.payload.decode("utf-8"))
@@ -193,9 +213,12 @@ def rule_timer(stop_event):
 
 def main():
     mqtt_host = os.getenv("MQTT_HOST", "mqtt")
-    mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="nw-m1-data-plane-local")
+    mqtt_port = int(os.getenv("MQTT_PORT", "8883"))
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                         client_id="nw-m1-data-plane-local", clean_session=False)
+    configure_mqtt_security(client)
     client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
     client.on_message = on_message
     stop_event = threading.Event()
     timer = threading.Thread(target=rule_timer, args=(stop_event,), name="rule-timer", daemon=True)
@@ -204,7 +227,7 @@ def main():
         try:
             client.connect(mqtt_host, mqtt_port, keepalive=60)
             client.loop_forever(retry_first_connection=True)
-        except OSError as exc:
+        except (OSError, ssl.SSLError, mqtt.MQTTException) as exc:
             LOG.warning("MQTT unavailable (%s), retrying", exc)
             time.sleep(3)
 

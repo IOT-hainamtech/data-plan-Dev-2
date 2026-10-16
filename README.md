@@ -8,7 +8,7 @@ Dự án xây dựng Data Plane độc lập để tiếp nhận dữ liệu t�
 
 ```mermaid
 flowchart TD
-    A[ESP32 / Simulator S1, S6] -->|MQTT| B[Mosquitto Broker]
+    A[ESP32 / Simulator S1, S6] -->|MQTT TLS 1.2+ / QoS 1| B[Mosquitto Broker]
     B --> C[Python Ingestion]
     C --> D[(PostgreSQL + TimescaleDB)]
     C --> E[Rule Engine / Status Tracker]
@@ -43,6 +43,8 @@ Hướng thiết kế dài hạn: dữ liệu từ các thiết bị và đườ
 - **Lưu trữ:** bảng `telemetry` đã được cấu hình là **TimescaleDB hypertable**.
 - **Outbox Worker:** claim bằng `FOR UPDATE SKIP LOCKED`, lease bền vững, retry có backoff/jitter, kiểm tra ACK và chống gửi trùng theo `alarm_key`.
 - **Kiểm thử:** Rule Engine và Outbox Worker đã được thử nghiệm với PostgreSQL và API nextGRP giả lập (mock).
+- **MQTT security:** TLS 1.2+, kiểm tra certificate, tài khoản riêng, ACL theo
+  thiết bị, QoS 1, retained status, LWT và tự động reconnect.
 
 > **Lưu ý:** Trạng thái `DELIVERED` trong môi trường demo chỉ xác nhận API **mock** đã nhận cảnh báo; **không có nghĩa cảnh báo đã được gửi tới nextGRP thật**.
 
@@ -63,6 +65,7 @@ notepad .env
 Đặt giá trị riêng cho `PG_PASSWORD` trong `.env`, sau đó chạy:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts/generate-dev-mqtt-assets.ps1
 docker compose --profile demo up -d --build
 docker compose ps
 ```
@@ -72,7 +75,7 @@ Các cổng dùng cho demo:
 | Dịch vụ | Địa chỉ |
 | --- | --- |
 | FastAPI | `http://127.0.0.1:8002` |
-| MQTT demo | `127.0.0.1:1885` |
+| MQTT TLS | `mqtts://127.0.0.1:8883` |
 | PostgreSQL | Chỉ truy cập trong mạng nội bộ Docker |
 
 ### Kiểm tra hệ thống
@@ -93,6 +96,29 @@ curl.exe http://127.0.0.1:8002/api/v1/outbox/metrics
 # Kiểm thử tự động
 docker compose exec -T -e RUN_DB_TESTS=1 data-plane python -m unittest discover -v
 ```
+
+Kiểm thử MQTT security cần tạm dừng simulator để tránh cạnh tranh retained status:
+
+```powershell
+docker compose stop simulator
+docker compose --profile mqtt-test run --rm mqtt-security-test
+docker compose start simulator
+```
+
+Quản lý credential/ACL mà không dừng toàn bộ stack:
+
+```powershell
+# Cấp tài khoản và ACL cho topic riêng
+.\scripts\manage-mqtt-account.ps1 grant -Username SENSOR-002 -DeviceId SENSOR-002
+
+# Đổi mật khẩu hoặc thu hồi quyền đăng nhập
+.\scripts\manage-mqtt-account.ps1 password -Username SENSOR-002
+.\scripts\manage-mqtt-account.ps1 revoke -Username SENSOR-002
+```
+
+Sau khi đổi mật khẩu, cập nhật secret trên chính thiết bị và reconnect thiết bị đó.
+Thu hồi bằng password file chặn lần xác thực tiếp theo; để ngắt ngay một session
+vật lý đang kết nối cần thêm cơ chế quản trị session/Dynamic Security.
 
 Các API dữ liệu thử nghiệm:
 
@@ -117,6 +143,7 @@ docker compose --profile demo stop
 app/                 Python services, Rule Engine, API, Worker và tests
 db/                  Schema và các SQL migration
 mosquitto/           Cấu hình MQTT Broker
+scripts/              Sinh TLS/credential và quản lý tài khoản MQTT
 docs/                Ghi chú kỹ thuật
 compose.yaml         Cấu hình Docker Compose
 .env.example         Mẫu biến môi trường (không chứa mật khẩu thật)
@@ -124,7 +151,7 @@ compose.yaml         Cấu hình Docker Compose
 
 ## Giới hạn hiện tại và kế hoạch phát triển
 
-- [ ] Cấu hình MQTT TLS 1.2+, tài khoản riêng và ACL theo thiết bị.
+- [x] MQTT TLS 1.2+, tài khoản riêng và ACL thiết bị cho development.
 - [ ] Kết nối ESP32/SHT31 và MC-38 thực tế theo hợp đồng MQTT trong URD.
 - [ ] Tích hợp API và đồng bộ Device/Profile/Rule/Status/Alarm thật với nextGRP (IF-01 đến IF-07).
 - [ ] Hoàn thiện kiểm thử timeout, LWT, vận hành và bảo mật theo toàn bộ URD.
@@ -133,6 +160,9 @@ compose.yaml         Cấu hình Docker Compose
 
 ### Bảo mật
 
-**Chỉ sử dụng cấu hình hiện tại cho phát triển trên máy local.** MQTT demo chưa bật TLS và xác thực thiết bị đầy đủ; không mở Broker ra Internet. File `.env` được `.gitignore` loại trừ và không được commit lên repository. Không bật gửi cảnh báo tới endpoint nextGRP thật khi chưa thống nhất API, quyền và thông tin xác thực.
+**Chỉ sử dụng Development CA cho local.** Broker chỉ bind `127.0.0.1`, không
+mở ra Internet. `.env`, `.secrets/` và `mosquitto/certs/` đều bị Git ignore.
+Dùng `scripts/manage-mqtt-account.ps1` để cấp/đổi/thu hồi tài khoản và reload
+Mosquitto mà không dừng toàn bộ stack. Không bật gửi Alarm tới nextGRP thật.
 
 Xem thêm ghi chú tại [`docs/TECH_NOTES.md`](docs/TECH_NOTES.md).
