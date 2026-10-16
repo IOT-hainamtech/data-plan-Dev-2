@@ -1,0 +1,118 @@
+# Separate Docker Compose project: does not overwrite the original MariaDB stack.
+name: nextwireless-dev2-pg
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.30.2-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nextwireless
+      POSTGRES_USER: nw_user
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Create .env from .env.example and set PG_PASSWORD}
+      TZ: UTC
+    # ports:
+#   - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ./db/002_rules.sql:/docker-entrypoint-initdb.d/002_rules.sql:ro
+      - ./db/003_m1_rule_engine.sql:/docker-entrypoint-initdb.d/003_m1_rule_engine.sql:ro
+      - ./db/004_durable_outbox.sql:/docker-entrypoint-initdb.d/004_durable_outbox.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nw_user -d nextwireless"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 25s
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1885:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+
+  data-plane:
+    build: ./app
+    restart: unless-stopped
+    environment: &runtime_env
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: nextwireless
+      DB_USER: nw_user
+      DB_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    command: ["sh", "-c", "python migrate.py && exec python -u ingestor.py"]
+
+  data-api:
+    build: ./app
+    restart: unless-stopped
+    environment: *runtime_env
+    ports:
+      - "127.0.0.1:8002:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # Development-only receiver. No traffic leaves the Compose network.
+  mock-nextgrp:
+    build: ./app
+    restart: unless-stopped
+    environment:
+      MOCK_NEXTGRP_TOKEN: mock-development-token
+    command: ["uvicorn", "mock_nextgrp:app", "--host", "0.0.0.0", "--port", "8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  outbox-worker:
+    build: ./app
+    restart: unless-stopped
+    environment:
+      <<: *runtime_env
+      OUTBOX_DELIVERY_ENABLED: "true"
+      NEXTGRP_ALARM_URL: http://mock-nextgrp:8080/mock/v1/alarms
+      NEXTGRP_AUTH_MODE: bearer
+      NEXTGRP_AUTH_TOKEN: mock-development-token
+      NEXTGRP_ALLOW_INSECURE_MOCK: "true"
+      OUTBOX_MAX_ATTEMPTS: "8"
+      OUTBOX_BACKOFF_BASE_SECONDS: "2"
+      OUTBOX_BACKOFF_MAX_SECONDS: "300"
+      OUTBOX_BACKOFF_JITTER: "0.2"
+      OUTBOX_LEASE_SECONDS: "60"
+      OUTBOX_METRICS_SECONDS: "30"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-plane:
+        condition: service_started
+      mock-nextgrp:
+        condition: service_healthy
+    command: ["python", "-u", "outbox_worker.py"]
+
+  simulator:
+    profiles: ["demo"]
+    build: ./app
+    restart: unless-stopped
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      SIM_INTERVAL: "10"
+    depends_on:
+      - data-plane
+    command: ["python", "-u", "simulator.py"]
+
+volumes:
+  postgres_data:
+  mqtt_data:
