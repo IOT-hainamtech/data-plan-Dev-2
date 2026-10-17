@@ -43,7 +43,9 @@ bool ConfigManager::load(AppConfig& c, std::string& error) const {
               read_string(h, "mqtt_password", c.mqtt_password) &&
               read_blob(h, "mqtt_ca", c.mqtt_ca) &&
               read_string(h, "org_code", c.org_code) && read_string(h, "site_code", c.site_code) &&
-              read_string(h, "device_id", c.device_id) && read_string(h, "sensor_type", sensor);
+              read_string(h, "device_id", c.device_id) &&
+              read_string(h, "profile_code", c.profile_code) &&
+              read_string(h, "sensor_type", sensor);
     uint8_t address = c.sht31_address, closed = static_cast<uint8_t>(c.door_closed_level);
     nvs_get_u32(h, "telemetry_sec", &c.telemetry_seconds);
     nvs_get_u32(h, "heartbeat_sec", &c.heartbeat_seconds);
@@ -67,6 +69,10 @@ bool ConfigManager::validate(const AppConfig& c, std::string& error) {
     if (c.mqtt_ca.find("-----BEGIN CERTIFICATE-----") == std::string::npos) { error = "MQTT CA certificate missing or invalid"; return false; }
     if (!safe_code(c.org_code) || !safe_code(c.site_code) || !safe_code(c.device_id)) { error = "invalid org/site/device code"; return false; }
     if (c.mqtt_username != c.device_id) { error = "MQTT username must match device_id"; return false; }
+    if ((c.sensor_type == SensorType::Sht31 && c.profile_code != "TEMP_HUM_SENSOR") ||
+        (c.sensor_type == SensorType::ReedDoor && c.profile_code != "DOOR_SENSOR")) {
+        error = "profile_code does not match sensor_type"; return false;
+    }
     if (c.telemetry_seconds == 0 || c.heartbeat_seconds == 0) { error = "interval must be positive"; return false; }
     if (c.sht31_address != 0x44 && c.sht31_address != 0x45) { error = "SHT31 address must be 0x44 or 0x45"; return false; }
     if (c.door_closed_level != 0 && c.door_closed_level != 1) { error = "door_closed_level must be 0 or 1"; return false; }

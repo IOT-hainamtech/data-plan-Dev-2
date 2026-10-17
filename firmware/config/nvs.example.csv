@@ -9,6 +9,7 @@ mqtt_ca,data,binary,certs/mqtt_ca.pem
 org_code,data,string,demo
 site_code,data,string,demo-site
 device_id,data,string,TH-001
+profile_code,data,string,TEMP_HUM_SENSOR
 sensor_type,data,string,sht31
 telemetry_sec,data,u32,60
 heartbeat_sec,data,u32,60

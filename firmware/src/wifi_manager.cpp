@@ -6,16 +6,34 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include <atomic>
+#include <algorithm>
 
 namespace {
 constexpr EventBits_t CONNECTED = BIT0;
 EventGroupHandle_t events;
+std::atomic<bool> reconnect_task_running{false};
+uint32_t reconnect_delay_ms = 1000;
+void reconnect_task(void*) {
+    while (!(xEventGroupGetBits(events) & CONNECTED)) {
+        vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+        esp_wifi_connect();
+        reconnect_delay_ms = std::min<uint32_t>(reconnect_delay_ms * 2, 30000);
+    }
+    reconnect_task_running = false;
+    vTaskDelete(nullptr);
+}
 void event_handler(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(events, CONNECTED);
-        esp_wifi_connect();
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) xEventGroupSetBits(events, CONNECTED);
+        if (!reconnect_task_running.exchange(true))
+            xTaskCreate(reconnect_task, "wifi_reconnect", 3072, nullptr, 5, nullptr);
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        reconnect_delay_ms = 1000;
+        xEventGroupSetBits(events, CONNECTED);
+    }
 }
 }
 

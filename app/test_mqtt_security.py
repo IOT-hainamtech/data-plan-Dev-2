@@ -10,6 +10,7 @@ import warnings
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
+import psycopg
 
 
 def stamp():
@@ -25,7 +26,7 @@ def tls_context(cafile):
 def connected_client(username, password, cafile, client_id=None, will=None):
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                          client_id=client_id or f"mqtt-test-{uuid.uuid4().hex}",
-                         protocol=mqtt.MQTTv5)
+                         protocol=mqtt.MQTTv311)
     client.username_pw_set(username, password)
     client.tls_set_context(tls_context(cafile))
     if will:
@@ -83,17 +84,65 @@ class MqttSecurityIntegrationTests(unittest.TestCase):
         self.assertTrue(rejected)
 
     def test_acl_rejects_cross_device_publish(self):
+        reader, reason = connected_client(self.reader_user, self.reader_password, self.ca)
+        self.assertFalse(reason.is_failure)
+        received, signal = [], threading.Event()
+        reader.on_message = lambda _c, _u, message: (received.append(message.payload), signal.set())
+        reader.subscribe("nw/v1/demo/demo-site/+/+", qos=1)
+        time.sleep(0.2)
+
+        cases = ((self.th_user, self.th_password, "DR-001", "event"),
+                 (os.environ["DR001_MQTT_USERNAME"], os.environ["DR001_MQTT_PASSWORD"],
+                  "TH-001", "telemetry"))
+        for username, password, target, channel in cases:
+            client, reason = connected_client(username, password, self.ca)
+            self.assertFalse(reason.is_failure)
+            topic = f"nw/v1/demo/demo-site/{target}/{channel}"
+            marker = f"acl-denied-{uuid.uuid4().hex}".encode()
+            info = client.publish(topic, marker, qos=1)
+            info.wait_for_publish(5)
+            self.assertTrue(info.is_published())  # PUBACK is transport ACK in MQTT 3.1.1.
+            client.disconnect(); client.loop_stop()
+            signal.wait(0.75); signal.clear()
+            self.assertNotIn(marker, received)
+        reader.disconnect(); reader.loop_stop()
+
+    @unittest.skipUnless(os.getenv("RUN_MQTT_INGESTION_TESTS") == "1",
+                         "set RUN_MQTT_INGESTION_TESTS=1")
+    def test_valid_telemetry_reaches_postgresql_once(self):
+        boot = f"mqtt-lan-{uuid.uuid4().hex[:12]}"
+        body = {"schema_version": 1, "device_id": "TH-001", "boot_id": boot,
+                "seq": 1, "ts": stamp(), "quality": "good",
+                "data": {"temperature": 25.0, "humidity": 50.0}}
         client, reason = connected_client(self.th_user, self.th_password, self.ca)
         self.assertFalse(reason.is_failure)
-        published, outcome = threading.Event(), {}
-        def on_publish(_client, _userdata, mid, reason_code, _properties):
-            outcome["reason"] = reason_code
-            published.set()
-        client.on_publish = on_publish
-        client.publish("nw/v1/demo/demo-site/DR-001/event", "{}", qos=1)
-        self.assertTrue(published.wait(5))
-        self.assertTrue(outcome["reason"].is_failure)
-        client.disconnect(); client.loop_stop()
+        try:
+            info = client.publish("nw/v1/demo/demo-site/TH-001/telemetry",
+                                  json.dumps(body), qos=1)
+            info.wait_for_publish(5)
+            self.assertTrue(info.is_published())
+            deadline = time.time() + 8
+            count = -1
+            while time.time() < deadline:
+                with psycopg.connect(host=os.environ["DB_HOST"], port=os.environ["DB_PORT"],
+                                     dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+                                     password=os.environ["DB_PASSWORD"]) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT count(*) FROM telemetry_reports WHERE boot_id=%s",
+                                       (boot,))
+                        count = cursor.fetchone()[0]
+                if count == 1:
+                    break
+                time.sleep(0.25)
+            self.assertEqual(count, 1)
+        finally:
+            client.disconnect(); client.loop_stop()
+            with psycopg.connect(host=os.environ["DB_HOST"], port=os.environ["DB_PORT"],
+                                 dbname=os.environ["DB_NAME"], user=os.environ["DB_USER"],
+                                 password=os.environ["DB_PASSWORD"]) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM telemetry WHERE boot_id=%s", (boot,))
+                    cursor.execute("DELETE FROM telemetry_reports WHERE boot_id=%s", (boot,))
 
     def test_retained_status_and_lwt(self):
         topic = "nw/v1/demo/demo-site/TH-001/status"

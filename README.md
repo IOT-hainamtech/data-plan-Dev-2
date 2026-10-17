@@ -166,4 +166,14 @@ mở ra Internet. `.env`, `.secrets/` và `mosquitto/certs/` đều bị Git ign
 Dùng `scripts/manage-mqtt-account.ps1` để cấp/đổi/thu hồi tài khoản và reload
 Mosquitto mà không dừng toàn bộ stack. Không bật gửi Alarm tới nextGRP thật.
 
+Để chuẩn bị kết nối ESP32 trên Wi-Fi mà vẫn giới hạn firewall theo subnet, xem
+[`docs/MQTT_LAN.md`](docs/MQTT_LAN.md). Compose tiếp tục bind loopback theo mặc
+định; chỉ đặt `MQTT_BIND_IP` sau khi đã xác nhận IP/subnet và firewall rule.
+
 Xem thêm ghi chú tại [`docs/TECH_NOTES.md`](docs/TECH_NOTES.md).
+
+Tài liệu chuẩn bị thiết bị:
+
+- [`docs/ESP32_PROVISIONING.md`](docs/ESP32_PROVISIONING.md)
+- [`docs/ESP32_HARDWARE_SETUP.md`](docs/ESP32_HARDWARE_SETUP.md)
+- [`docs/ESP32_TEST_CHECKLIST.md`](docs/ESP32_TEST_CHECKLIST.md)

@@ -4,11 +4,19 @@ umask 077
 base=/work
 certs="$base/mosquitto/certs"
 secrets="$base/.secrets"
+lan_ip="${MQTT_SERVER_LAN_IP:-}"
 mkdir -p "$certs" "$secrets"
 if [ ! -s "$certs/ca.key" ]; then
   openssl genrsa -out "$certs/ca.key" 3072
   openssl req -x509 -new -key "$certs/ca.key" -sha256 -days 825 \
     -subj "/CN=nextWireless Development MQTT CA" -out "$certs/ca.crt"
+fi
+if [ -n "$lan_ip" ] && ! printf '%s\n' "$lan_ip" | awk -F. '
+  NF != 4 { exit 1 }
+  { for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1 }
+'; then
+  echo "MQTT_SERVER_LAN_IP must be a valid IPv4 address" >&2
+  exit 1
 fi
 cat > "$certs/server.cnf" <<'EOF'
 [req]
@@ -24,6 +32,9 @@ DNS.1=mqtt
 DNS.2=localhost
 IP.1=127.0.0.1
 EOF
+if [ -n "$lan_ip" ]; then
+  printf 'IP.2=%s\n' "$lan_ip" >> "$certs/server.cnf"
+fi
 openssl genrsa -out "$certs/server.key" 3072
 openssl req -new -key "$certs/server.key" -out "$certs/server.csr" -config "$certs/server.cnf"
 openssl x509 -req -in "$certs/server.csr" -CA "$certs/ca.crt" -CAkey "$certs/ca.key" \
@@ -47,4 +58,4 @@ elif [ ! -s "$secrets/mqtt-broker.env" ] || [ ! -s "$secrets/mqtt-data-plane.env
   exit 1
 fi
 chmod 600 "$secrets"/*.env "$certs"/*.key
-echo "Generated development MQTT CA/server certificate and runtime credentials."
+echo "Generated development MQTT server certificate; preserved existing CA and credentials when present."

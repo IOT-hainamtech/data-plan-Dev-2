@@ -15,6 +15,7 @@ struct AppConfig {
     std::string org_code;
     std::string site_code;
     std::string device_id;
+    std::string profile_code;
     SensorType sensor_type{SensorType::Sht31};
     uint32_t telemetry_seconds{60};
     uint32_t heartbeat_seconds{60};

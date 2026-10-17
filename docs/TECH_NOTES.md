@@ -4,7 +4,9 @@
 - The demo continues to normalize all timestamps to **naive UTC** (`timestamp without time zone`) for compatibility with the Stage 2 Rule Engine. Production should clearly define UTC semantics and test timezone conversion.
 - PostgreSQL replaces MySQL-specific `INSERT IGNORE` with `ON CONFLICT ... DO NOTHING` and `ON DUPLICATE KEY UPDATE` with `ON CONFLICT ... DO UPDATE`.
 - JSON payloads are inserted as PostgreSQL `jsonb` using `psycopg.types.json.Jsonb`.
-- Mosquitto exposes only TLS port 8883 on localhost. Anonymous access is disabled;
+- Mosquitto exposes only TLS port 8883 and binds localhost by default. Optional LAN
+  binding is explicit through `MQTT_BIND_IP` and must be paired with the restricted
+  Private-profile firewall rule documented in `MQTT_LAN.md`. Anonymous access is disabled;
   Data Plane and each simulator device use separate generated credentials. Static
   ACLs limit devices to their own topic root. Development CA keys, server keys and
   runtime credentials are generated locally and ignored by Git.

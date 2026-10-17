@@ -33,7 +33,9 @@ services:
     env_file:
       - ./.secrets/mqtt-broker.env
     ports:
-      - "127.0.0.1:8883:8883"
+      # Safe default is loopback. Set MQTT_BIND_IP to the confirmed LAN address
+      # only while following docs/MQTT_LAN.md and after applying its firewall rule.
+      - "${MQTT_BIND_IP:-127.0.0.1}:8883:8883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/acl:/mosquitto/config/acl:ro
@@ -153,11 +155,20 @@ services:
       MQTT_HOST: mqtt
       MQTT_PORT: "8883"
       MQTT_CA_FILE: /run/mqtt/ca.crt
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: nextwireless
+      DB_USER: nw_user
+      DB_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
     volumes:
       - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
     depends_on:
       mqtt:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      data-plane:
+        condition: service_started
     command: ["python", "-m", "unittest", "-v", "test_mqtt_security"]
 
 volumes:

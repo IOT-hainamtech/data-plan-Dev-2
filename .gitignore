@@ -11,6 +11,8 @@ firmware/.vscode/
 firmware/certs/mqtt_ca.pem
 firmware/config/nvs.csv
 firmware/config/nvs.bin
+firmware/config/nvs.*.bin
+firmware/config/*.bak-*
 firmware/config/*.local.*
 firmware/sdkconfig.*
 !firmware/sdkconfig.defaults
