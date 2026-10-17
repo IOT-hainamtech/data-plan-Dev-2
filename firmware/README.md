@@ -30,10 +30,10 @@ payload, `seq` and `event_id`; retry does not allocate a new sequence number.
 Topics are `nw/v1/{org_code}/{site_code}/{device_id}/{channel}`. The configured
 username must equal `device_id`, matching the current Mosquitto ACL model.
 
-- SHT31 success: `telemetry` with `quality="ok"` and numeric `temperature` and
+- SHT31 success: top-level `quality="good"` and numeric `temperature` and
   `humidity`.
-- SHT31 failure: `telemetry` carries only `data.quality="error"`; no fabricated
-  temperature or humidity is published.
+- SHT31 failure: `telemetry` carries top-level `quality="error"` and an empty
+  `data` object; no fabricated temperature or humidity is published.
 - Door transition: `event`, `DOOR_OPENED`/`DOOR_CLOSED`, stable unique `event_id`.
 - Door heartbeat: `status` with `state="online"` and `data.door_state`.
 - Birth: retained QoS-1 `status=online`; LWT: retained QoS-1 `status=offline`.

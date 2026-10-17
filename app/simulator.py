@@ -100,8 +100,9 @@ def main():
         while True:
             temperature = round(random.uniform(25.0, 33.0), 1)
             humidity = round(random.uniform(45.0, 70.0), 1)
-            s1.publish("telemetry", s1.message({
-                "quality": "ok", "temperature": temperature, "humidity": humidity}))
+            telemetry = s1.message({"temperature": temperature, "humidity": humidity})
+            telemetry["quality"] = "good"
+            s1.publish("telemetry", telemetry)
             if tick % 4 == 0:
                 door_open = not door_open
                 state = "open" if door_open else "closed"

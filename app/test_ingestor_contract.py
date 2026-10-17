@@ -2,6 +2,7 @@
 import os
 import unittest
 import uuid
+from unittest import mock
 
 from ingestor import (db_connection, door_heartbeat_event, save_message,
                       validate_message, validate_telemetry_data)
@@ -9,17 +10,28 @@ from ingestor import (db_connection, door_heartbeat_event, save_message,
 
 class IngestorContractTests(unittest.TestCase):
     def test_sht31_error_is_telemetry_without_fake_measurements(self):
-        quality, metrics = validate_telemetry_data({"quality": "error"})
+        quality, metrics = validate_telemetry_data({"quality": "error", "data": {}})
         self.assertEqual(quality, "error")
         self.assertEqual(metrics, {})
         with self.assertRaisesRegex(ValueError, "must not contain measurements"):
-            validate_telemetry_data({"quality": "error", "temperature": 0})
+            validate_telemetry_data({"quality": "error", "data": {"temperature": 0}})
 
     def test_valid_sht31_values_accept_explicit_quality(self):
         quality, metrics = validate_telemetry_data({
-            "quality": "ok", "temperature": 29.5, "humidity": 61.0})
-        self.assertEqual(quality, "ok")
+            "quality": "good", "data": {"temperature": 29.5, "humidity": 61.0}})
+        self.assertEqual(quality, "good")
         self.assertEqual(set(metrics), {"temperature", "humidity"})
+        with self.assertRaisesRegex(ValueError, "good or error"):
+            validate_telemetry_data({
+                "quality": "ok", "data": {"temperature": 29.5, "humidity": 61.0}})
+
+    def test_good_is_default_and_quality_inside_data_is_rejected(self):
+        quality, _ = validate_telemetry_data(
+            {"data": {"temperature": 29.5, "humidity": 61.0}})
+        self.assertEqual(quality, "good")
+        with self.assertRaisesRegex(ValueError, "unsupported telemetry"):
+            validate_telemetry_data({
+                "data": {"quality": "good", "temperature": 29.5, "humidity": 61.0}})
 
     def test_door_heartbeat_maps_to_idempotent_observation(self):
         body = {"boot_id": "boot-a", "seq": 42, "data": {"door_state": "open"}}
@@ -60,8 +72,10 @@ class TelemetryQualityDatabaseTests(unittest.TestCase):
     def test_error_report_is_persisted_without_numeric_measurements(self):
         body = {"schema_version": 1, "device_id": "TH-001", "boot_id": self.boot_id,
                 "seq": 1, "ts": "2026-10-17T00:00:00Z",
-                "data": {"quality": "error"}}
-        save_message("nw/v1/demo/demo-site/TH-001/telemetry", body)
+                "quality": "error", "data": {}}
+        with mock.patch("ingestor.on_telemetry") as evaluate_rule:
+            save_message("nw/v1/demo/demo-site/TH-001/telemetry", body)
+            evaluate_rule.assert_not_called()
         with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""SELECT quality FROM telemetry_reports
@@ -73,7 +87,7 @@ class TelemetryQualityDatabaseTests(unittest.TestCase):
     def test_duplicate_boot_sequence_is_idempotent(self):
         body = {"schema_version": 1, "device_id": "TH-001", "boot_id": self.boot_id,
                 "seq": 2, "ts": "2026-10-17T00:01:00Z",
-                "data": {"quality": "ok", "temperature": 28.0, "humidity": 60.0}}
+                "quality": "good", "data": {"temperature": 28.0, "humidity": 60.0}}
         save_message("nw/v1/demo/demo-site/TH-001/telemetry", body)
         save_message("nw/v1/demo/demo-site/TH-001/telemetry", body)
         with db_connection() as conn:

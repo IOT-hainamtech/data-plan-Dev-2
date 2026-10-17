@@ -99,7 +99,7 @@ extern "C" void app_main() {
             pending_periodic_seq = sequence.next(); const char* door_state = nullptr;
             if (config.sensor_type == SensorType::ReedDoor) door_state = door.is_open() ? "open" : "closed";
             pending_periodic = PayloadBuilder::status(config.device_id, sequence.boot_id(),
-                pending_periodic_seq, ts, "online", "ok", door_state);
+                pending_periodic_seq, ts, "online", door_state);
             pending_periodic_topic = status_topic;
             last_heartbeat = now;
         }

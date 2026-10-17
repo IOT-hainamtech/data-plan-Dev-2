@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS telemetry_reports (
     device_id VARCHAR(64) NOT NULL REFERENCES devices(device_id),
     boot_id VARCHAR(64) NOT NULL,
     seq BIGINT NOT NULL CHECK (seq >= 0),
-    quality VARCHAR(8) NOT NULL CHECK (quality IN ('ok', 'error')),
+    quality VARCHAR(8) NOT NULL CONSTRAINT ck_telemetry_reports_quality
+        CHECK (quality IN ('good', 'error')),
     measured_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     received_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     payload_json JSONB NOT NULL,

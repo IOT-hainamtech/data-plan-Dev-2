@@ -52,20 +52,21 @@ def require_int(value, name):
         raise ValueError(f"{name} must be a non-negative integer")
 
 
-def validate_telemetry_data(data):
-    allowed = {"temperature", "humidity", "quality"}
-    if not data or not set(data).issubset(allowed):
+def validate_telemetry_data(payload):
+    data = payload["data"]
+    allowed = {"temperature", "humidity"}
+    quality = payload.get("quality", "good")
+    if quality not in ("good", "error"):
+        raise ValueError("quality must be good or error")
+    if not set(data).issubset(allowed):
         raise ValueError("unsupported telemetry metric")
-    quality = data.get("quality", "ok")
-    if quality not in ("ok", "error"):
-        raise ValueError("quality must be ok or error")
-    metrics = {key: value for key, value in data.items() if key != "quality"}
+    metrics = data
     if quality == "error":
         if metrics:
             raise ValueError("error telemetry must not contain measurements")
         return quality, metrics
     if not metrics:
-        raise ValueError("ok telemetry requires measurements")
+        raise ValueError("good telemetry requires measurements")
     return quality, metrics
 
 
@@ -123,7 +124,7 @@ def save_message(topic, body):
         if channel == "telemetry":
             if profile != "TEMP_HUM_SENSOR":
                 raise ValueError("telemetry not supported by device profile")
-            quality, metrics = validate_telemetry_data(body["data"])
+            quality, metrics = validate_telemetry_data(body)
             cur.execute("""INSERT INTO telemetry_reports
                 (device_id,boot_id,seq,quality,measured_at,received_at,payload_json)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)

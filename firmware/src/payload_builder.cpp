@@ -20,11 +20,10 @@ std::string finish(cJSON* root) {
 }
 std::string PayloadBuilder::status(const std::string& device, const std::string& boot,
                                    uint64_t seq, const char* ts, const char* state,
-                                   const char* quality, const char* door_state) {
+                                   const char* door_state) {
     cJSON* root = base(device, boot, seq, ts);
     cJSON_AddStringToObject(root, "state", state);
     cJSON* data = cJSON_AddObjectToObject(root, "data");
-    if (quality) cJSON_AddStringToObject(data, "quality", quality);
     if (door_state) cJSON_AddStringToObject(data, "door_state", door_state);
     return finish(root);
 }
@@ -33,7 +32,7 @@ std::string PayloadBuilder::telemetry(const std::string& device, const std::stri
                                       float humidity) {
     cJSON* root = base(device, boot, seq, ts);
     cJSON* data = cJSON_AddObjectToObject(root, "data");
-    cJSON_AddStringToObject(data, "quality", "ok");
+    cJSON_AddStringToObject(root, "quality", "good");
     cJSON_AddNumberToObject(data, "temperature", temperature);
     cJSON_AddNumberToObject(data, "humidity", humidity);
     return finish(root);
@@ -41,8 +40,8 @@ std::string PayloadBuilder::telemetry(const std::string& device, const std::stri
 std::string PayloadBuilder::telemetry_error(const std::string& device, const std::string& boot,
                                             uint64_t seq, const char* ts) {
     cJSON* root = base(device, boot, seq, ts);
-    cJSON* data = cJSON_AddObjectToObject(root, "data");
-    cJSON_AddStringToObject(data, "quality", "error");
+    cJSON_AddObjectToObject(root, "data");
+    cJSON_AddStringToObject(root, "quality", "error");
     return finish(root);
 }
 std::string PayloadBuilder::door_event(const std::string& device, const std::string& boot,
