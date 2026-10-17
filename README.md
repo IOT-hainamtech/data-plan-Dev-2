@@ -37,8 +37,8 @@ Hướng thiết kế dài hạn: dữ liệu từ các thiết bị và đườ
 
 ## Chức năng hiện có
 
-- **S1 — Nhiệt độ/độ ẩm:** tiếp nhận telemetry; cảnh báo khi nhiệt độ vượt 30 °C liên tục 300 giây, hysteresis 1 °C, phục hồi liên tục 120 giây và quiet window 600 giây.
-- **S6 — Giám sát cửa:** tiếp nhận sự kiện mở/đóng; ngoài 08:00–18:00 (Asia/Ho_Chi_Minh) cảnh báo ngay, trong giờ cảnh báo khi cửa mở liên tục 300 giây; có timer kiểm tra khi không phát sinh MQTT mới.
+- **S1 — Nhiệt độ/độ ẩm:** tiếp nhận telemetry gồm `quality`; bản tin lỗi không chứa số đo giả. Cảnh báo khi nhiệt độ vượt 30 °C liên tục 300 giây, hysteresis 1 °C, phục hồi liên tục 120 giây và quiet window 600 giây.
+- **S6 — Giám sát cửa:** giờ làm việc là thứ Hai–thứ Sáu, 08:00–18:00 theo `Asia/Ho_Chi_Minh`; ngoài lịch cảnh báo ngay, trong lịch cảnh báo khi cửa mở liên tục 300 giây. Timer xử lý khi không có MQTT mới và heartbeat `door_state` đối soát event bị mất.
 - **Thiết bị:** theo dõi trạng thái online/offline; đã kiểm thử chu trình dừng/khởi động lại simulator.
 - **Lưu trữ:** bảng `telemetry` đã được cấu hình là **TimescaleDB hypertable**.
 - **Outbox Worker:** claim bằng `FOR UPDATE SKIP LOCKED`, lease bền vững, retry có backoff/jitter, kiểm tra ACK và chống gửi trùng theo `alarm_key`.

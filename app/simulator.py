@@ -100,7 +100,8 @@ def main():
         while True:
             temperature = round(random.uniform(25.0, 33.0), 1)
             humidity = round(random.uniform(45.0, 70.0), 1)
-            s1.publish("telemetry", s1.message({"temperature": temperature, "humidity": humidity}))
+            s1.publish("telemetry", s1.message({
+                "quality": "ok", "temperature": temperature, "humidity": humidity}))
             if tick % 4 == 0:
                 door_open = not door_open
                 state = "open" if door_open else "closed"
@@ -108,7 +109,8 @@ def main():
                 s6.publish("event", s6.message({"door_state": state}, event_type=event_type))
             if tick > 0 and tick * INTERVAL % 60 == 0:
                 s1.publish("status", s1.message({}, state="online"), retain=True)
-                s6.publish("status", s6.message({}, state="online"), retain=True)
+                state = "open" if door_open else "closed"
+                s6.publish("status", s6.message({"door_state": state}, state="online"), retain=True)
             tick += 1
             time.sleep(INTERVAL)
     except KeyboardInterrupt:

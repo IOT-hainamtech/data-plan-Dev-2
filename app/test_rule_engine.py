@@ -63,6 +63,18 @@ class DoorTests(unittest.TestCase):
         self.assertFalse(door_should_fire(now=opened + timedelta(seconds=299), **kwargs))
         self.assertTrue(door_should_fire(now=opened + timedelta(seconds=300), **kwargs))
 
+    def test_weekend_is_always_outside_business_hours(self):
+        # 2026-10-17 is Saturday; 02:00 UTC is 09:00 in Ho Chi Minh City.
+        saturday = datetime(2026, 10, 17, 2, 0)
+        sunday = datetime(2026, 10, 18, 2, 0)
+        for now in (saturday, sunday):
+            self.assertFalse(is_business_hours(
+                now, self.start, self.end, "Asia/Ho_Chi_Minh"))
+            self.assertTrue(door_should_fire(
+                opened_at=now, now=now, hold_seconds=300,
+                business_start=self.start, business_end=self.end,
+                schedule_timezone="Asia/Ho_Chi_Minh"))
+
 
 if __name__ == "__main__":
     unittest.main()

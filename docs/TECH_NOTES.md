@@ -30,3 +30,6 @@
   through NVS and the broker CA is embedded separately from source. The repository
   still has no authoritative URD v1.1 document, and no physical ESP32/SHT31/MC-38
   validation has been performed yet.
+- Migration `005_urd_alignment.sql` records telemetry reports idempotently by
+  `(device_id, boot_id, seq)`, including SHT31 `quality=error` without fabricated
+  measurements. DR-001 status heartbeats reconcile missed door transitions.

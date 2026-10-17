@@ -30,16 +30,17 @@ payload, `seq` and `event_id`; retry does not allocate a new sequence number.
 Topics are `nw/v1/{org_code}/{site_code}/{device_id}/{channel}`. The configured
 username must equal `device_id`, matching the current Mosquitto ACL model.
 
-- SHT31 success: `telemetry` with numeric `temperature` and `humidity` only.
-- SHT31 failure: no fabricated telemetry; a compatible `status` heartbeat carries
-  `data.quality="error"`.
+- SHT31 success: `telemetry` with `quality="ok"` and numeric `temperature` and
+  `humidity`.
+- SHT31 failure: `telemetry` carries only `data.quality="error"`; no fabricated
+  temperature or humidity is published.
 - Door transition: `event`, `DOOR_OPENED`/`DOOR_CLOSED`, stable unique `event_id`.
 - Door heartbeat: `status` with `state="online"` and `data.door_state`.
 - Birth: retained QoS-1 `status=online`; LWT: retained QoS-1 `status=offline`.
 
-The status-channel choice for sensor quality is necessary because the current
-Data Plane rejects non-numeric keys in S1 telemetry. Confirm this mapping against
-URD v1.1 when that document is available.
+DR-001 heartbeats are authoritative state observations. The Data Plane maps their
+`boot_id`/`seq` to an idempotent reconciliation ID so a later heartbeat repairs a
+missed open/close event without allowing an older observation to reverse it.
 
 ## Local configuration and build
 

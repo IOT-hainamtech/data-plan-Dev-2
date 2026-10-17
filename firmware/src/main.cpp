@@ -76,9 +76,10 @@ extern "C" void app_main() {
                 pending_periodic_topic = nw::topic(config.org_code, config.site_code,
                                                     config.device_id, "telemetry");
             } else {
-                pending_periodic = PayloadBuilder::status(config.device_id, sequence.boot_id(),
-                    pending_periodic_seq, ts, "online", "error");
-                pending_periodic_topic = status_topic;
+                pending_periodic = PayloadBuilder::telemetry_error(config.device_id,
+                    sequence.boot_id(), pending_periodic_seq, ts);
+                pending_periodic_topic = nw::topic(config.org_code, config.site_code,
+                                                    config.device_id, "telemetry");
             }
             last_telemetry = now;
         }

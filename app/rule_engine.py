@@ -38,7 +38,10 @@ def is_business_hours(at_utc, start, end, timezone_name):
         zone = ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError:
         return False
-    local_time = at_utc.replace(tzinfo=timezone.utc).astimezone(zone).time().replace(tzinfo=None)
+    local = at_utc.replace(tzinfo=timezone.utc).astimezone(zone)
+    if local.weekday() >= 5:
+        return False
+    local_time = local.time().replace(tzinfo=None)
     if start <= end:
         return start <= local_time < end
     return local_time >= start or local_time < end
@@ -131,7 +134,9 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
     return alarms
 
 
-def on_event(cur, *, device_id, event_id, event_type, received_at, payload):
+def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
+             observed_at=None):
+    observed_at = observed_at or received_at
     cur.execute("""SELECT rule_code,severity,hold_seconds,clear_hold_seconds,quiet_seconds,
             business_start,business_end,schedule_timezone FROM rule_definitions
             WHERE device_id=%s AND rule_kind='STATE_CHANGE' AND enabled=TRUE
@@ -146,6 +151,8 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload):
             source_event_id FROM rule_runtime_state WHERE rule_code=%s AND device_id=%s FOR UPDATE""",
             (rule_code, device_id))
         state, changed_at, active, last_fired, episode, source_event = cur.fetchone()
+        if changed_at is not None and observed_at <= changed_at:
+            continue
         if event_type == "DOOR_OPENED":
             if state == "open":
                 continue
@@ -153,7 +160,7 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload):
             cur.execute("""UPDATE rule_runtime_state SET current_state='open',state_changed_at=%s,
                 source_event_id=%s,episode_key=%s,episode_started_at=%s,recovery_started_at=NULL
                 WHERE rule_code=%s AND device_id=%s""",
-                (received_at, event_id, episode, received_at, rule_code, device_id))
+                (observed_at, event_id, episode, observed_at, rule_code, device_id))
         elif event_type == "DOOR_CLOSED":
             if state != "open":
                 continue
@@ -168,8 +175,8 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload):
                 source_event_id=%s,is_active=%s,episode_key=%s,
                 episode_started_at=CASE WHEN %s THEN episode_started_at ELSE NULL END,
                 recovery_started_at=%s WHERE rule_code=%s AND device_id=%s""",
-                (received_at, event_id, keep_episode, episode if keep_episode else None,
-                 keep_episode, received_at if keep_episode else None, rule_code, device_id))
+                (observed_at, event_id, keep_episode, episode if keep_episode else None,
+                 keep_episode, observed_at if keep_episode else None, rule_code, device_id))
     return changes + evaluate_due_rules(cur, received_at, device_id=device_id)
 
 

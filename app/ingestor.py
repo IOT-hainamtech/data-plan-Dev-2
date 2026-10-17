@@ -52,6 +52,33 @@ def require_int(value, name):
         raise ValueError(f"{name} must be a non-negative integer")
 
 
+def validate_telemetry_data(data):
+    allowed = {"temperature", "humidity", "quality"}
+    if not data or not set(data).issubset(allowed):
+        raise ValueError("unsupported telemetry metric")
+    quality = data.get("quality", "ok")
+    if quality not in ("ok", "error"):
+        raise ValueError("quality must be ok or error")
+    metrics = {key: value for key, value in data.items() if key != "quality"}
+    if quality == "error":
+        if metrics:
+            raise ValueError("error telemetry must not contain measurements")
+        return quality, metrics
+    if not metrics:
+        raise ValueError("ok telemetry requires measurements")
+    return quality, metrics
+
+
+def door_heartbeat_event(profile, body):
+    door_state = body["data"].get("door_state")
+    if door_state is None:
+        return None
+    if profile != "DOOR_SENSOR" or door_state not in ("open", "closed"):
+        raise ValueError("invalid door heartbeat")
+    return (f"heartbeat:{body['boot_id']}:{body['seq']}",
+            "DOOR_OPENED" if door_state == "open" else "DOOR_CLOSED")
+
+
 def validate_message(topic, payload):
     parts = topic.split("/")
     if len(parts) != 6 or parts[:2] != ["nw", "v1"]:
@@ -96,9 +123,17 @@ def save_message(topic, body):
         if channel == "telemetry":
             if profile != "TEMP_HUM_SENSOR":
                 raise ValueError("telemetry not supported by device profile")
-            if not body["data"] or not set(body["data"]).issubset({"temperature", "humidity"}):
-                raise ValueError("unsupported telemetry metric")
-            for metric, value in body["data"].items():
+            quality, metrics = validate_telemetry_data(body["data"])
+            cur.execute("""INSERT INTO telemetry_reports
+                (device_id,boot_id,seq,quality,measured_at,received_at,payload_json)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (device_id,boot_id,seq) DO NOTHING""",
+                (device, body["boot_id"], body["seq"], quality, stamp, received, Jsonb(body)))
+            if not cur.rowcount:
+                conn.commit()
+                return
+            inserted = 1
+            for metric, value in metrics.items():
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     raise ValueError(f"{metric} must be numeric")
                 if not (float('-inf') < value < float('inf')):
@@ -131,7 +166,8 @@ def save_message(topic, body):
             inserted = cur.rowcount
             if inserted:
                 on_event(cur, device_id=device, event_id=body["event_id"],
-                         event_type=event_type, received_at=received, payload=body)
+                         event_type=event_type, received_at=received, payload=body,
+                         observed_at=stamp)
         else:
             state = body["state"]
             # Record state history only on transitions, not on each heartbeat.
@@ -147,6 +183,12 @@ def save_message(topic, body):
                 ON CONFLICT (device_id) DO UPDATE SET current_state=EXCLUDED.current_state,
                 received_at=EXCLUDED.received_at, boot_id=EXCLUDED.boot_id""",
                 (device, state, received, body["boot_id"]))
+            heartbeat = door_heartbeat_event(profile, body)
+            if heartbeat:
+                heartbeat_id, heartbeat_type = heartbeat
+                on_event(cur, device_id=device, event_id=heartbeat_id,
+                         event_type=heartbeat_type, received_at=received, payload=body,
+                         observed_at=stamp)
         conn.commit()
         LOG.info("SAVED %s device=%s inserted=%d", channel, device, inserted)
     except Exception:

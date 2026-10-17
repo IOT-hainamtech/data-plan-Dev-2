@@ -18,6 +18,7 @@ services:
       - ./db/002_rules.sql:/docker-entrypoint-initdb.d/002_rules.sql:ro
       - ./db/003_m1_rule_engine.sql:/docker-entrypoint-initdb.d/003_m1_rule_engine.sql:ro
       - ./db/004_durable_outbox.sql:/docker-entrypoint-initdb.d/004_durable_outbox.sql:ro
+      - ./db/005_urd_alignment.sql:/docker-entrypoint-initdb.d/005_urd_alignment.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nw_user -d nextwireless"]
       interval: 5s

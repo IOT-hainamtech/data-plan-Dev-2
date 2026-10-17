@@ -63,6 +63,35 @@ class RuleDatabaseTests(unittest.TestCase):
         self.cur.execute("SELECT count(*) FROM alarm_outbox")
         self.assertEqual(self.cur.fetchone()[0], 1)
 
+    def test_heartbeat_reconciles_missing_open_and_close_events(self):
+        on_event(self.cur, device_id="DR-001", event_id="heartbeat:boot-a:10",
+                 event_type="DOOR_OPENED", received_at=self.t0,
+                 observed_at=self.t0, payload={"data": {"door_state": "open"}})
+        evaluate_due_rules(self.cur, self.t0 + timedelta(seconds=300))
+        on_event(self.cur, device_id="DR-001", event_id="heartbeat:boot-a:11",
+                 event_type="DOOR_CLOSED", received_at=self.t0 + timedelta(seconds=360),
+                 observed_at=self.t0 + timedelta(seconds=360),
+                 payload={"data": {"door_state": "closed"}})
+        self.cur.execute("""SELECT occurrence_kind,count(*) FROM alarm_occurrences
+            WHERE episode_key LIKE 'ep:S6_DOOR_OPEN:%' GROUP BY occurrence_kind""")
+        self.assertEqual(dict(self.cur.fetchall()), {"TRIGGERED": 1, "CLEARED": 1})
+
+    def test_stale_door_observation_cannot_reverse_newer_heartbeat(self):
+        on_event(self.cur, device_id="DR-001", event_id="heartbeat:boot-b:20",
+                 event_type="DOOR_OPENED", received_at=self.t0,
+                 observed_at=self.t0, payload={"data": {"door_state": "open"}})
+        on_event(self.cur, device_id="DR-001", event_id="heartbeat:boot-b:22",
+                 event_type="DOOR_CLOSED", received_at=self.t0 + timedelta(seconds=20),
+                 observed_at=self.t0 + timedelta(seconds=20),
+                 payload={"data": {"door_state": "closed"}})
+        on_event(self.cur, device_id="DR-001", event_id="heartbeat:boot-b:21",
+                 event_type="DOOR_OPENED", received_at=self.t0 + timedelta(seconds=30),
+                 observed_at=self.t0 + timedelta(seconds=10),
+                 payload={"data": {"door_state": "open"}})
+        self.cur.execute("""SELECT current_state FROM rule_runtime_state
+            WHERE rule_code='S6_DOOR_OPEN' AND device_id='DR-001'""")
+        self.assertEqual(self.cur.fetchone()[0], "closed")
+
 
 if __name__ == "__main__":
     unittest.main()
