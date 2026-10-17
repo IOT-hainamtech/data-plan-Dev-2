@@ -142,6 +142,7 @@ docker compose --profile demo stop
 ```text
 app/                 Python services, Rule Engine, API, Worker và tests
 db/                  Schema và các SQL migration
+firmware/            ESP32 ESP-IDF/PlatformIO dùng chung cho SHT31 và MC-38
 mosquitto/           Cấu hình MQTT Broker
 scripts/              Sinh TLS/credential và quản lý tài khoản MQTT
 docs/                Ghi chú kỹ thuật
@@ -152,7 +153,7 @@ compose.yaml         Cấu hình Docker Compose
 ## Giới hạn hiện tại và kế hoạch phát triển
 
 - [x] MQTT TLS 1.2+, tài khoản riêng và ACL thiết bị cho development.
-- [ ] Kết nối ESP32/SHT31 và MC-38 thực tế theo hợp đồng MQTT trong URD.
+- [ ] Flash và kiểm thử firmware ESP32/SHT31, MC-38 trên phần cứng thực tế.
 - [ ] Tích hợp API và đồng bộ Device/Profile/Rule/Status/Alarm thật với nextGRP (IF-01 đến IF-07).
 - [ ] Hoàn thiện kiểm thử timeout, LWT, vận hành và bảo mật theo toàn bộ URD.
 - [ ] Bổ sung chính sách retention, metrics/alert vận hành, backup/restore và benchmark mở rộng.

@@ -5,3 +5,12 @@ __pycache__/
 .vscode/
 .secrets/
 mosquitto/certs/
+firmware/.pio/
+firmware/.venv/
+firmware/.vscode/
+firmware/certs/mqtt_ca.pem
+firmware/config/nvs.csv
+firmware/config/nvs.bin
+firmware/config/*.local.*
+firmware/sdkconfig.*
+!firmware/sdkconfig.defaults

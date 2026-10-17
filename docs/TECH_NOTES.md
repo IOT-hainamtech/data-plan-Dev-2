@@ -26,3 +26,7 @@
   authentication after reload, but an already connected physical device must also
   have its session terminated operationally. Evaluate Mosquitto Dynamic Security
   for centralized immediate session revocation.
+- `firmware/` is an ESP-IDF/PlatformIO hardware skeleton. Secrets are provisioned
+  through NVS and the broker CA is embedded separately from source. The repository
+  still has no authoritative URD v1.1 document, and no physical ESP32/SHT31/MC-38
+  validation has been performed yet.
