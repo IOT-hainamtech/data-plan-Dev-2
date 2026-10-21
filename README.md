@@ -39,10 +39,10 @@ Hướng thiết kế dài hạn: dữ liệu từ các thiết bị và đườ
 
 - **S1 — Nhiệt độ/độ ẩm:** tiếp nhận `quality` ở top-level (`good` mặc định hoặc `error`); bản tin lỗi không chứa số đo giả. Cảnh báo khi nhiệt độ vượt 30 °C liên tục 300 giây, hysteresis 1 °C, phục hồi liên tục 120 giây và quiet window 600 giây.
 - **S6 — Giám sát cửa:** giờ làm việc là thứ Hai–thứ Sáu, 08:00–18:00 theo `Asia/Ho_Chi_Minh`; ngoài lịch cảnh báo ngay, trong lịch cảnh báo khi cửa mở liên tục 300 giây. Timer xử lý khi không có MQTT mới và heartbeat `door_state` đối soát event bị mất.
-- **Thiết bị:** theo dõi trạng thái online/offline; đã kiểm thử chu trình dừng/khởi động lại simulator.
+- **Thiết bị:** theo dõi birth online, LWT/offline, `last_seen_at`, timeout theo cấu hình thiết bị, chống transition trùng và tự trở lại online khi reconnect. Trạng thái và lịch sử được lưu bền trong PostgreSQL.
 - **Lưu trữ:** bảng `telemetry` đã được cấu hình là **TimescaleDB hypertable**.
 - **Outbox Worker:** claim bằng `FOR UPDATE SKIP LOCKED`, lease bền vững, retry có backoff/jitter, kiểm tra ACK và chống gửi trùng theo `alarm_key`.
-- **Kiểm thử:** Rule Engine và Outbox Worker đã được thử nghiệm với PostgreSQL và API nextGRP giả lập (mock).
+- **Kiểm thử:** migration 001–007, ingestion, Rule Engine, Status Tracker, Outbox Worker, MQTT security và luồng End-to-End đã được thử nghiệm với PostgreSQL/TimescaleDB và API nextGRP giả lập (mock).
 - **MQTT security:** TLS 1.2+, kiểm tra certificate, tài khoản riêng, ACL theo
   thiết bị, QoS 1, retained status, LWT và tự động reconnect.
 
@@ -97,12 +97,63 @@ curl.exe http://127.0.0.1:8002/api/v1/outbox/metrics
 docker compose exec -T -e RUN_DB_TESTS=1 data-plane python -m unittest discover -v
 ```
 
+Các endpoint dữ liệu hiện có:
+
+```text
+GET /api/v1/health
+GET /api/v1/outbox/metrics
+GET /api/v1/devices
+GET /api/v1/devices/{device_id}/latest
+GET /api/v1/devices/{device_id}/telemetry?limit=5
+GET /api/v1/devices/{device_id}/status
+GET /api/v1/devices/{device_id}/events
+GET /api/v1/alarms
+```
+
 Kiểm thử MQTT security cần tạm dừng simulator để tránh cạnh tranh retained status:
 
 ```powershell
 docker compose stop simulator
 docker compose --profile mqtt-test run --rm mqtt-security-test
 docker compose start simulator
+```
+
+Chạy đầy đủ các nhóm integration bằng container test, chỉ kết nối tới PostgreSQL,
+MQTT và Mock nextGRP trong Compose:
+
+```powershell
+# Database, Rule Engine, Status Tracker, Outbox và multi-device storage
+docker compose exec -T -e RUN_DB_TESTS=1 data-plane `
+  python -m unittest -v test_ingestor_contract test_rule_engine_integration `
+  test_status_tracker test_outbox_integration `
+  test_multi_device_integration.MultiDeviceDatabaseTests
+
+# MQTT → Ingestion → PostgreSQL
+docker compose stop simulator
+docker compose --profile mqtt-test run --rm `
+  -e RUN_MQTT_INGESTION_TESTS=1 mqtt-security-test
+
+# End-to-End S1/S6/LWT → Alarm → Outbox → Mock nextGRP ACK
+docker compose --profile mqtt-test run --rm `
+  -e RUN_E2E_TESTS=1 `
+  -e MOCK_TEST_URL=http://mock-nextgrp:8080/mock/v1/alarms `
+  -e MOCK_TEST_TOKEN=mock-development-token `
+  mqtt-security-test python -m unittest -v test_e2e_simulator
+docker compose start simulator
+```
+
+Kiểm tra migration 001–007 trên PostgreSQL test tách biệt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test-migrations-fresh.ps1
+```
+
+Build và kiểm tra contract firmware:
+
+```powershell
+firmware\.venv\Scripts\python.exe -m platformio run -d firmware -e sht31
+firmware\.venv\Scripts\python.exe -m platformio run -d firmware -e reed_door
+firmware\.venv\Scripts\python.exe -m unittest discover -s firmware\tests -v
 ```
 
 Quản lý credential/ACL mà không dừng toàn bộ stack:
@@ -119,15 +170,6 @@ Quản lý credential/ACL mà không dừng toàn bộ stack:
 Sau khi đổi mật khẩu, cập nhật secret trên chính thiết bị và reconnect thiết bị đó.
 Thu hồi bằng password file chặn lần xác thực tiếp theo; để ngắt ngay một session
 vật lý đang kết nối cần thêm cơ chế quản trị session/Dynamic Security.
-
-Các API dữ liệu thử nghiệm:
-
-```text
-GET /api/v1/health
-GET /api/v1/outbox/metrics
-GET /api/v1/devices/TH-001/latest
-GET /api/v1/devices/TH-001/telemetry?limit=5
-```
 
 Dừng các dịch vụ demo mà vẫn giữ dữ liệu:
 
@@ -153,11 +195,28 @@ compose.yaml         Cấu hình Docker Compose
 ## Giới hạn hiện tại và kế hoạch phát triển
 
 - [x] MQTT TLS 1.2+, tài khoản riêng và ACL thiết bị cho development.
+- [x] Migration 001–007, Device Status Tracker timeout, LWT/reconnect và durable outbox recovery.
+- [x] End-to-End bằng Simulator cho S1, S6, Alarm, Outbox và Mock nextGRP ACK.
 - [ ] Flash và kiểm thử firmware ESP32/SHT31, MC-38 trên phần cứng thực tế.
 - [ ] Tích hợp API và đồng bộ Device/Profile/Rule/Status/Alarm thật với nextGRP (IF-01 đến IF-07).
-- [ ] Hoàn thiện kiểm thử timeout, LWT, vận hành và bảo mật theo toàn bộ URD.
+- [ ] Nghiệm thu phần cứng FT-01 đến FT-12 và kiểm thử soak/recovery trên thiết bị thật.
+- [ ] Hoàn thiện mô hình mở rộng nhiều Organization/Site/Zone; seed M1 hiện dùng `demo/demo-site`.
 - [ ] Bổ sung chính sách retention, metrics/alert vận hành, backup/restore và benchmark mở rộng.
 - [ ] Nghiên cứu Gateway/Protocol Adapter cho thiết bị công nghiệp và kết nối 4G/5G.
+
+## Kết quả kiểm thử đã xác minh
+
+Kết quả gần nhất ngày **2026-10-21** được ghi chi tiết tại
+[`docs/DATA_PLANE_STABILIZATION_REPORT.md`](docs/DATA_PLANE_STABILIZATION_REPORT.md):
+
+- 7/7 service Compose chạy; PostgreSQL, MQTT và Mock nextGRP healthy.
+- 54/54 test ứng dụng và 9/9 firmware contract test PASS.
+- Tổng cộng **63 PASS, 0 FAIL, 0 SKIPPED, 0 BLOCKED** khi chạy từng nhóm với cờ integration phù hợp.
+- Fresh migration và idempotency 001–007 PASS trên TimescaleDB test tách biệt.
+- FastAPI health `UP`; Outbox tại thời điểm xác minh có `pending=0`, `failed=0`.
+- Firmware SHT31 và MC-38 đều build PASS.
+
+Đây là trạng thái PoC/Simulator, không phải nghiệm thu phần cứng hoặc nextGRP production.
 
 ### Bảo mật
 
@@ -169,6 +228,11 @@ Mosquitto mà không dừng toàn bộ stack. Không bật gửi Alarm tới nex
 Để chuẩn bị kết nối ESP32 trên Wi-Fi mà vẫn giới hạn firewall theo subnet, xem
 [`docs/MQTT_LAN.md`](docs/MQTT_LAN.md). Compose tiếp tục bind loopback theo mặc
 định; chỉ đặt `MQTT_BIND_IP` sau khi đã xác nhận IP/subnet và firewall rule.
+
+Tại lần xác minh 2026-10-21, IPv4 Wi-Fi của máy phát triển là `192.168.1.110`
+nhưng development certificate cũ chứa SAN `192.168.1.87`; vì vậy không dùng
+certificate cũ để kết nối ESP32 qua IP mới. Cần chốt IP LAN rồi cấp lại
+certificate theo tài liệu, không tắt hostname verification hoặc mở firewall tùy ý.
 
 Xem thêm ghi chú tại [`docs/TECH_NOTES.md`](docs/TECH_NOTES.md).
 
