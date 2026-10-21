@@ -97,26 +97,32 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
         hold_start, recovery, active, last_sample, last_fired, episode, episode_started = cur.fetchone()
         if last_sample is not None and measured_at <= last_sample:
             continue
+        # URD continuity requirement: if sample gap exceeds 2x interval (120s), reset continuity window
+        if last_sample is not None and (measured_at - last_sample).total_seconds() > 120:
+            if not active and hold_start is not None:
+                hold_start = measured_at
+            if active and recovery is not None:
+                recovery = measured_at
         next_hold, next_recovery, next_active, transition = threshold_transition(
             value=value, threshold=float(threshold), hysteresis=float(hysteresis),
-            hold_seconds=int(hold_s), clear_hold_seconds=int(clear_s), observed_at=received_at,
+            hold_seconds=int(hold_s), clear_hold_seconds=int(clear_s), observed_at=measured_at,
             entered_at=hold_start, recovery_started_at=recovery, active=bool(active))
         if transition == "TRIGGERED":
-            allowed = last_fired is None or (received_at - last_fired).total_seconds() >= quiet_s
+            allowed = last_fired is None or (measured_at - last_fired).total_seconds() >= quiet_s
             if allowed:
-                episode = f"ep:{rule_code}:{_key(device_id, metric, hold_start or received_at)}"
-                episode_started = hold_start or received_at
+                episode = f"ep:{rule_code}:{_key(device_id, metric, hold_start or measured_at)}"
+                episode_started = hold_start or measured_at
                 alarms += int(_write_occurrence(
                     cur, rule_code=rule_code, device_id=device_id, severity=severity,
                     occurrence_kind="TRIGGERED", observed_at=received_at, episode_key=episode,
                     event_type="THRESHOLD_EXCEEDED",
                     details={"metric": metric, "value": value, "threshold": threshold,
                              "hold_seconds": hold_s, "hysteresis": hysteresis}))
-                last_fired = received_at
+                last_fired = measured_at
             else:
                 next_active = False
                 # Preserve the already-satisfied hold while the quiet window runs.
-                next_hold = hold_start or received_at
+                next_hold = hold_start or measured_at
         elif transition == "CLEARED" and episode:
             alarms += int(_write_occurrence(
                 cur, rule_code=rule_code, device_id=device_id, severity=severity,

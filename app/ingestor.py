@@ -109,6 +109,56 @@ def validate_message(topic, payload):
     return org, site, device, channel, stamp, source
 
 
+def update_device_presence(cur, *, device_id, boot_id, received_at, explicit_state=None):
+    """Update device presence, last_seen_at timestamp, and record transitions without duplicates."""
+    cur.execute("SELECT current_state FROM device_status WHERE device_id=%s FOR UPDATE", (device_id,))
+    row = cur.fetchone()
+    target_state = explicit_state or "online"
+    prev_state = row[0] if row else None
+    inserted = 0
+
+    if prev_state != target_state:
+        cur.execute("""INSERT INTO device_status_history
+            (device_id, state, received_at, boot_id) VALUES (%s, %s, %s, %s)""",
+            (device_id, target_state, received_at, boot_id))
+        inserted = 1
+
+    cur.execute("""INSERT INTO device_status
+        (device_id, current_state, received_at, boot_id, last_seen_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (device_id) DO UPDATE SET
+            current_state = EXCLUDED.current_state,
+            received_at = EXCLUDED.received_at,
+            boot_id = EXCLUDED.boot_id,
+            last_seen_at = COALESCE(EXCLUDED.last_seen_at, device_status.last_seen_at)""",
+        (device_id, target_state, received_at, boot_id, received_at if target_state == "online" else None))
+    return inserted
+
+
+def reconcile_device_timeouts(cur, now, device_id=None):
+    """Mark online devices as offline if no message has been received within timeout_seconds."""
+    cur.execute("""SELECT device_id, boot_id, last_seen_at, timeout_seconds
+        FROM device_status
+        WHERE current_state = 'online'
+          AND last_seen_at IS NOT NULL
+          AND last_seen_at <= %s - (timeout_seconds || ' seconds')::interval
+          AND (%s::text IS NULL OR device_id = %s)
+        FOR UPDATE""", (now, device_id, device_id))
+    timed_out = cur.fetchall()
+    for dev_id, boot_id, last_seen, timeout_sec in timed_out:
+        cur.execute("""INSERT INTO device_status_history
+            (device_id, state, received_at, boot_id)
+            VALUES (%s, 'offline', %s, %s)""",
+            (dev_id, now, boot_id))
+        cur.execute("""UPDATE device_status
+            SET current_state = 'offline', received_at = %s
+            WHERE device_id = %s""",
+            (now, dev_id))
+        LOG.warning("DEVICE_OFFLINE_TIMEOUT device=%s last_seen=%s age=%.1fs timeout=%ds",
+                    dev_id, last_seen, (now - last_seen).total_seconds(), timeout_sec)
+    return len(timed_out)
+
+
 def save_message(topic, body):
     org, site, device, channel, stamp, source = validate_message(topic, body)
     received = now_utc()
@@ -134,6 +184,7 @@ def save_message(topic, body):
                 conn.commit()
                 return
             inserted = 1
+            update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
             for metric, value in metrics.items():
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     raise ValueError(f"{metric} must be numeric")
@@ -166,24 +217,14 @@ def save_message(topic, body):
                  received, Jsonb(body)))
             inserted = cur.rowcount
             if inserted:
+                update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
                 on_event(cur, device_id=device, event_id=body["event_id"],
                          event_type=event_type, received_at=received, payload=body,
                          observed_at=stamp)
         else:
             state = body["state"]
-            # Record state history only on transitions, not on each heartbeat.
-            cur.execute("SELECT current_state FROM device_status WHERE device_id=%s", (device,))
-            previous = cur.fetchone()
-            if previous is None or previous[0] != state:
-                cur.execute("""INSERT INTO device_status_history
-                    (device_id,state,received_at,boot_id) VALUES (%s,%s,%s,%s)""",
-                    (device, state, received, body["boot_id"]))
-                inserted = 1
-            cur.execute("""INSERT INTO device_status (device_id,current_state,received_at,boot_id)
-                VALUES (%s,%s,%s,%s)
-                ON CONFLICT (device_id) DO UPDATE SET current_state=EXCLUDED.current_state,
-                received_at=EXCLUDED.received_at, boot_id=EXCLUDED.boot_id""",
-                (device, state, received, body["boot_id"]))
+            inserted = update_device_presence(cur, device_id=device, boot_id=body["boot_id"],
+                                              received_at=received, explicit_state=state)
             heartbeat = door_heartbeat_event(profile, body)
             if heartbeat:
                 heartbeat_id, heartbeat_type = heartbeat
@@ -244,12 +285,16 @@ def rule_timer(stop_event):
     interval = max(1, int(os.getenv("RULE_TIMER_INTERVAL", "5")))
     while not stop_event.wait(interval):
         try:
+            now = now_utc()
             with db_connection() as conn:
                 with conn.cursor() as cur:
-                    changes = evaluate_due_rules(cur, now_utc())
+                    changes = evaluate_due_rules(cur, now)
+                    timed_out = reconcile_device_timeouts(cur, now)
                 conn.commit()
             if changes:
                 LOG.info("Rule timer persisted %d alarm occurrence(s)", changes)
+            if timed_out:
+                LOG.info("Status tracker marked %d device(s) offline due to timeout", timed_out)
         except Exception:
             LOG.exception("Rule timer iteration failed")
 

@@ -46,16 +46,22 @@ if [ ! -e "$secrets/mqtt-broker.env" ] && [ ! -e "$secrets/mqtt-data-plane.env" 
   data_plane_password="$(openssl rand -base64 32 | tr -d '\r\n')"
   th001_password="$(openssl rand -base64 32 | tr -d '\r\n')"
   dr001_password="$(openssl rand -base64 32 | tr -d '\r\n')"
-  printf 'MQTT_DATA_PLANE_PASSWORD=%s\nMQTT_TH001_PASSWORD=%s\nMQTT_DR001_PASSWORD=%s\n' \
-    "$data_plane_password" "$th001_password" "$dr001_password" > "$secrets/mqtt-broker.env"
+  th002_password="$(openssl rand -base64 32 | tr -d '\r\n')"
+  printf 'MQTT_DATA_PLANE_PASSWORD=%s\nMQTT_TH001_PASSWORD=%s\nMQTT_DR001_PASSWORD=%s\nMQTT_TH002_PASSWORD=%s\n' \
+    "$data_plane_password" "$th001_password" "$dr001_password" "$th002_password" > "$secrets/mqtt-broker.env"
   printf 'MQTT_USERNAME=data-plane\nMQTT_PASSWORD=%s\n' \
     "$data_plane_password" > "$secrets/mqtt-data-plane.env"
-  printf 'TH001_MQTT_USERNAME=TH-001\nTH001_MQTT_PASSWORD=%s\nDR001_MQTT_USERNAME=DR-001\nDR001_MQTT_PASSWORD=%s\n' \
-    "$th001_password" "$dr001_password" > "$secrets/mqtt-simulator.env"
+  printf 'TH001_MQTT_USERNAME=TH-001\nTH001_MQTT_PASSWORD=%s\nDR001_MQTT_USERNAME=DR-001\nDR001_MQTT_PASSWORD=%s\nTH002_MQTT_USERNAME=TH-002\nTH002_MQTT_PASSWORD=%s\n' \
+    "$th001_password" "$dr001_password" "$th002_password" > "$secrets/mqtt-simulator.env"
 elif [ ! -s "$secrets/mqtt-broker.env" ] || [ ! -s "$secrets/mqtt-data-plane.env" ] || \
      [ ! -s "$secrets/mqtt-simulator.env" ]; then
   echo "Refusing to replace a partial MQTT secret set; remove all three files intentionally." >&2
   exit 1
+fi
+if [ -s "$secrets/mqtt-broker.env" ] && ! grep -q "MQTT_TH002_PASSWORD=" "$secrets/mqtt-broker.env"; then
+  th002_password="$(openssl rand -base64 32 | tr -d '\r\n')"
+  printf 'MQTT_TH002_PASSWORD=%s\n' "$th002_password" >> "$secrets/mqtt-broker.env"
+  printf 'TH002_MQTT_USERNAME=TH-002\nTH002_MQTT_PASSWORD=%s\n' "$th002_password" >> "$secrets/mqtt-simulator.env"
 fi
 chmod 600 "$secrets"/*.env "$certs"/*.key
 echo "Generated development MQTT server certificate; preserved existing CA and credentials when present."

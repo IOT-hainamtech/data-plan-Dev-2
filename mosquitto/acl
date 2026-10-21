@@ -7,3 +7,6 @@ topic write nw/v1/demo/demo-site/TH-001/#
 
 user DR-001
 topic write nw/v1/demo/demo-site/DR-001/#
+
+user TH-002
+topic write nw/v1/demo/demo-site/TH-002/#

@@ -17,6 +17,9 @@ if [ ! -s "$password_file" ]; then
     mosquitto_passwd -b "$password_file" TH-001 "$MQTT_TH001_PASSWORD"
     mosquitto_passwd -b "$password_file" DR-001 "$MQTT_DR001_PASSWORD"
 fi
+if [ -n "${MQTT_TH002_PASSWORD:-}" ]; then
+    mosquitto_passwd -b "$password_file" TH-002 "$MQTT_TH002_PASSWORD"
+fi
 chown mosquitto:mosquitto "$password_file"
 chmod 600 "$password_file"
 exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf

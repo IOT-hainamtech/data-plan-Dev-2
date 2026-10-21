@@ -75,6 +75,33 @@ class DoorTests(unittest.TestCase):
                 business_start=self.start, business_end=self.end,
                 schedule_timezone="Asia/Ho_Chi_Minh"))
 
+    def test_exact_business_hours_boundaries(self):
+        # Asia/Ho_Chi_Minh is UTC+7. Wednesday 2026-10-14.
+        # 08:00:00 local = 01:00:00 UTC (start of business hours)
+        t_0800 = datetime(2026, 10, 14, 1, 0, 0)
+        self.assertTrue(is_business_hours(t_0800, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
+        # 07:59:59 local = 00:59:59 UTC (1s before business hours)
+        t_0759 = datetime(2026, 10, 14, 0, 59, 59)
+        self.assertFalse(is_business_hours(t_0759, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
+        # 17:59:59 local = 10:59:59 UTC (last second of business hours)
+        t_1759 = datetime(2026, 10, 14, 10, 59, 59)
+        self.assertTrue(is_business_hours(t_1759, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
+        # 18:00:00 local = 11:00:00 UTC (exact end of business hours, exclusive)
+        t_1800 = datetime(2026, 10, 14, 11, 0, 0)
+        self.assertFalse(is_business_hours(t_1800, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
+    def test_friday_to_saturday_midnight_transition(self):
+        # Friday 23:59:59 local = Friday 16:59:59 UTC
+        fri_night = datetime(2026, 10, 16, 16, 59, 59)
+        self.assertFalse(is_business_hours(fri_night, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
+        # Saturday 00:00:00 local = Friday 17:00:00 UTC
+        sat_midnight = datetime(2026, 10, 16, 17, 0, 0)
+        self.assertFalse(is_business_hours(sat_midnight, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
 
 if __name__ == "__main__":
     unittest.main()

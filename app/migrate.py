@@ -10,7 +10,8 @@ from ingestor import db_connection
 def main():
     scripts = [Path(__file__).with_name(name) for name in
                ("002_rules.sql", "003_m1_rule_engine.sql", "004_durable_outbox.sql",
-                "005_urd_alignment.sql", "006_quality_contract.sql")]
+                "005_urd_alignment.sql", "006_quality_contract.sql",
+                "007_status_tracker_timeout.sql")]
     statements = []
     for script in scripts:
         statements.extend(stmt.strip() for stmt in sqlparse.split(script.read_text(encoding="utf-8")) if stmt.strip())
