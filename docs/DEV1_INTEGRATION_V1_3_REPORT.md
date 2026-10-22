@@ -21,9 +21,8 @@ Migration `009_dev1_integration_v1_3.sql` adds configuration versions/hashes, de
 ## Verification
 
 - Compile/import in Docker image: PASS.
-- Core unit, PostgreSQL, contract/API, rule, status, outbox and tenant tests: 52 PASS.
-- MQTT TLS/ACL suite: 5 PASS, 1 feature-gated ingestion case skipped in that invocation (the ingestion path is covered by DB/E2E suites).
-- MQTT end-to-end suite: 3 PASS (LWT/reconnect, S1, S6).
+- Full discovery with every feature gate enabled: 64 PASS, 0 FAIL, 0 SKIPPED.
+- MQTT end-to-end coverage includes LWT/reconnect, S1 and S6; MQTT TLS/ACL includes live PostgreSQL ingestion.
 - Isolated fresh migration/regression suite: 16 PASS; idempotency pass and required constraints PASS.
 - Snapshot reconciliation: six resource kinds, reversed input order, tenant and stale-version protection PASS.
 

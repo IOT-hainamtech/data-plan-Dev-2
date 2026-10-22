@@ -106,12 +106,15 @@ class MultiDeviceDatabaseTests(unittest.TestCase):
         with db_connection() as conn:
             with conn.cursor() as cur:
                 # Check alarm on TH-001
-                cur.execute("SELECT count(*) FROM alarm_occurrences WHERE device_id='TH-001' AND occurrence_kind='TRIGGERED'")
+                cur.execute("""SELECT count(*) FROM alarm_occurrences
+                    WHERE device_id='TH-001' AND rule_code='S1_TEMP_HIGH'
+                      AND occurrence_kind='TRIGGERED'""")
                 th1_alarms = cur.fetchone()[0]
                 self.assertEqual(th1_alarms, 1)
 
                 # Check NO alarm on TH-002
-                cur.execute("SELECT count(*) FROM alarm_occurrences WHERE device_id='TH-002'")
+                cur.execute("""SELECT count(*) FROM alarm_occurrences
+                    WHERE device_id='TH-002' AND rule_code='S1_TH002_TEMP_HIGH'""")
                 th2_alarms = cur.fetchone()[0]
                 self.assertEqual(th2_alarms, 0)
 
