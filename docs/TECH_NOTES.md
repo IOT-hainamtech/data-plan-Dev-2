@@ -4,7 +4,12 @@
 - The demo continues to normalize all timestamps to **naive UTC** (`timestamp without time zone`) for compatibility with the Stage 2 Rule Engine. Production should clearly define UTC semantics and test timezone conversion.
 - PostgreSQL replaces MySQL-specific `INSERT IGNORE` with `ON CONFLICT ... DO NOTHING` and `ON DUPLICATE KEY UPDATE` with `ON CONFLICT ... DO UPDATE`.
 - JSON payloads are inserted as PostgreSQL `jsonb` using `psycopg.types.json.Jsonb`.
-- The broker and API bind to localhost only on Windows; the container-internal MQTT listener remains anonymous and unencrypted. Not production-safe.
+- Mosquitto exposes only TLS port 8883 and binds localhost by default. Optional LAN
+  binding is explicit through `MQTT_BIND_IP` and must be paired with the restricted
+  Private-profile firewall rule documented in `MQTT_LAN.md`. Anonymous access is disabled;
+  Data Plane and each simulator device use separate generated credentials. Static
+  ACLs limit devices to their own topic root. Development CA keys, server keys and
+  runtime credentials are generated locally and ignored by Git.
 - The PostgreSQL volume is separate from the existing MariaDB volume. No automatic transfer of old alarms/telemetry.
 - No standalone URD document is present in this workspace. The M1 S1/S6 behavior
   is implemented from the supplied acceptance criteria and remains configurable
@@ -19,3 +24,17 @@
   mandatory in the adapter unless `NEXTGRP_ALLOW_INSECURE_MOCK=true` is explicitly
   set for local testing.
 - Timescale image `timescale/timescaledb:2.30.2-pg17` is pinned as observed on Docker Hub in October 2026; upgrade intentionally after tests rather than use `latest`.
+- Static password/ACL files can be reloaded with SIGHUP. Revocation blocks future
+  authentication after reload, but an already connected physical device must also
+  have its session terminated operationally. Evaluate Mosquitto Dynamic Security
+  for centralized immediate session revocation.
+- `firmware/` is an ESP-IDF/PlatformIO hardware skeleton. Secrets are provisioned
+  through NVS and the broker CA is embedded separately from source. The repository
+  still has no authoritative URD v1.1 document, and no physical ESP32/SHT31/MC-38
+  validation has been performed yet.
+- Migration `005_urd_alignment.sql` records telemetry reports idempotently by
+  `(device_id, boot_id, seq)`, including top-level SHT31 `quality=error` without fabricated
+  measurements. DR-001 status heartbeats reconcile missed door transitions.
+- Migration `008_multi_site_registry.sql` keeps `device_id` globally unique and adds the
+  Organization/Site/Zone registry, data-driven profile contracts and five rule scopes. Tenant data
+  API calls use a development-only `X-Org-Code` header; verified identity/RBAC remains a Dev1 task.

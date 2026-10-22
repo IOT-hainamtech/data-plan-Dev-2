@@ -1,6 +1,10 @@
 # Separate Docker Compose project: does not overwrite the original MariaDB stack.
 name: nextwireless-dev2-pg
 
+x-app-build: &app-build
+  context: .
+  dockerfile: app/Dockerfile
+
 services:
   postgres:
     image: timescale/timescaledb:2.30.2-pg17
@@ -14,10 +18,7 @@ services:
 #   - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
-      - ./db/002_rules.sql:/docker-entrypoint-initdb.d/002_rules.sql:ro
-      - ./db/003_m1_rule_engine.sql:/docker-entrypoint-initdb.d/003_m1_rule_engine.sql:ro
-      - ./db/004_durable_outbox.sql:/docker-entrypoint-initdb.d/004_durable_outbox.sql:ro
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nw_user -d nextwireless"]
       interval: 5s
@@ -28,15 +29,31 @@ services:
   mqtt:
     image: eclipse-mosquitto:2
     restart: unless-stopped
+    env_file:
+      - ./.secrets/mqtt-broker.env
     ports:
-      - "127.0.0.1:1885:1883"
+      # Safe default is loopback. Set MQTT_BIND_IP to the confirmed LAN address
+      # only while following docs/MQTT_LAN.md and after applying its firewall rule.
+      - "${MQTT_BIND_IP:-127.0.0.1}:8883:8883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - ./mosquitto/start-secure.sh:/mosquitto/config/start-secure.sh:ro
+      - ./mosquitto/certs:/mosquitto/certs-src:ro
       - mqtt_data:/mosquitto/data
+    entrypoint: ["/bin/sh", "/mosquitto/config/start-secure.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -p 8883 --cafile /mosquitto/data/security/certs/ca.crt -u data-plane -P \"$$MQTT_DATA_PLANE_PASSWORD\" -t nw/internal/health -m ok -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   data-plane:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
+    env_file:
+      - ./.secrets/mqtt-data-plane.env
     environment: &runtime_env
       DB_HOST: postgres
       DB_PORT: "5432"
@@ -44,16 +61,21 @@ services:
       DB_USER: nw_user
       DB_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
       MQTT_HOST: mqtt
-      MQTT_PORT: "1883"
+      MQTT_PORT: "8883"
+      MQTT_CA_FILE: /run/mqtt/ca.crt
+      MQTT_TLS_MIN_VERSION: "1.2"
+    volumes:
+      - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
+      - ./db/migrations:/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
       mqtt:
-        condition: service_started
+        condition: service_healthy
     command: ["sh", "-c", "python migrate.py && exec python -u ingestor.py"]
 
   data-api:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     environment: *runtime_env
     ports:
@@ -65,7 +87,7 @@ services:
 
   # Development-only receiver. No traffic leaves the Compose network.
   mock-nextgrp:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     environment:
       MOCK_NEXTGRP_TOKEN: mock-development-token
@@ -77,7 +99,7 @@ services:
       retries: 10
 
   outbox-worker:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     environment:
       <<: *runtime_env
@@ -103,15 +125,51 @@ services:
 
   simulator:
     profiles: ["demo"]
-    build: ./app
+    build: *app-build
     restart: unless-stopped
+    env_file:
+      - ./.secrets/mqtt-simulator.env
     environment:
       MQTT_HOST: mqtt
-      MQTT_PORT: "1883"
+      MQTT_PORT: "8883"
+      MQTT_CA_FILE: /run/mqtt/ca.crt
+      MQTT_TLS_MIN_VERSION: "1.2"
       SIM_INTERVAL: "10"
+    volumes:
+      - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
     depends_on:
-      - data-plane
+      data-plane:
+        condition: service_started
+      mqtt:
+        condition: service_healthy
     command: ["python", "-u", "simulator.py"]
+
+  mqtt-security-test:
+    profiles: ["mqtt-test"]
+    build: *app-build
+    env_file:
+      - ./.secrets/mqtt-data-plane.env
+      - ./.secrets/mqtt-simulator.env
+    environment:
+      RUN_MQTT_TESTS: "1"
+      MQTT_HOST: mqtt
+      MQTT_PORT: "8883"
+      MQTT_CA_FILE: /run/mqtt/ca.crt
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: nextwireless
+      DB_USER: nw_user
+      DB_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+    volumes:
+      - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
+    depends_on:
+      mqtt:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      data-plane:
+        condition: service_started
+    command: ["python", "-m", "unittest", "-v", "tests.security.test_mqtt_security"]
 
 volumes:
   postgres_data:

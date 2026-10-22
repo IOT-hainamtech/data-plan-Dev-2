@@ -1,5 +1,5 @@
 """Run with: docker compose exec -T data-plane python check.py"""
-from ingestor import db_connection
+from core.database import db_connection
 
 QUERIES = {
     "Registered demo devices": "SELECT COUNT(*) FROM devices",
