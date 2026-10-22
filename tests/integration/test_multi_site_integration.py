@@ -48,6 +48,10 @@ class MultiSiteIntegrationTests(unittest.TestCase):
                 cur.execute("DELETE FROM alarm_occurrences WHERE rule_code=%s", (self.rule,))
                 cur.execute("DELETE FROM rule_runtime_state WHERE rule_code=%s", (self.rule,))
                 cur.execute("DELETE FROM rule_definitions WHERE rule_code=%s", (self.rule,))
+                cur.execute("DELETE FROM status_outbox WHERE device_id IN (%s,%s)", (self.dev_a, self.dev_b))
+                cur.execute("DELETE FROM alarm_outbox WHERE alarm_key IN (SELECT alarm_key FROM alarm_occurrences WHERE device_id IN (%s,%s))", (self.dev_a, self.dev_b))
+                cur.execute("DELETE FROM alarm_occurrences WHERE device_id IN (%s,%s)", (self.dev_a, self.dev_b))
+                cur.execute("DELETE FROM rule_runtime_state WHERE device_id IN (%s,%s)", (self.dev_a, self.dev_b))
                 for table in ("telemetry", "telemetry_reports", "device_status_history", "device_status"):
                     cur.execute(f"DELETE FROM {table} WHERE device_id IN (%s,%s)", (self.dev_a, self.dev_b))
                 cur.execute("DELETE FROM devices WHERE device_id IN (%s,%s)", (self.dev_a, self.dev_b))

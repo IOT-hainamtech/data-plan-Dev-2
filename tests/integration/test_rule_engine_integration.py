@@ -32,9 +32,9 @@ class RuleDatabaseTests(unittest.TestCase):
         for s in (301, 361, 421):
             on_telemetry(self.cur, device_id="TH-001", metric="temperature", value=28,
                          measured_at=self.t0 + timedelta(seconds=s), received_at=self.t0 + timedelta(seconds=s))
-        self.cur.execute("SELECT occurrence_kind,count(*) FROM alarm_occurrences GROUP BY occurrence_kind")
+        self.cur.execute("SELECT occurrence_kind,count(*) FROM alarm_occurrences WHERE rule_code='S1_TEMP_HIGH' GROUP BY occurrence_kind")
         self.assertEqual(dict(self.cur.fetchall()), {"TRIGGERED": 1, "CLEARED": 1})
-        self.cur.execute("SELECT count(*) FROM alarm_outbox")
+        self.cur.execute("SELECT count(*) FROM alarm_outbox WHERE alarm_key IN (SELECT alarm_key FROM alarm_occurrences WHERE rule_code='S1_TEMP_HIGH')")
         self.assertEqual(self.cur.fetchone()[0], 2)
 
     def test_s6_timer_duplicate_and_close(self):
@@ -46,9 +46,9 @@ class RuleDatabaseTests(unittest.TestCase):
         on_event(self.cur, device_id="DR-001", event_id="integration-close",
                  event_type="DOOR_CLOSED", received_at=self.t0 + timedelta(seconds=401),
                  payload={"data": {"door_state": "closed"}})
-        self.cur.execute("SELECT occurrence_kind,count(*) FROM alarm_occurrences GROUP BY occurrence_kind")
+        self.cur.execute("SELECT occurrence_kind,count(*) FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN' GROUP BY occurrence_kind")
         self.assertEqual(dict(self.cur.fetchall()), {"TRIGGERED": 1, "CLEARED": 1})
-        self.cur.execute("SELECT count(*) FROM alarm_outbox")
+        self.cur.execute("SELECT count(*) FROM alarm_outbox WHERE alarm_key IN (SELECT alarm_key FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN')")
         self.assertEqual(self.cur.fetchone()[0], 2)
 
     def test_duplicate_source_event_is_idempotent(self):
@@ -56,9 +56,9 @@ class RuleDatabaseTests(unittest.TestCase):
             on_event(self.cur, device_id="DR-001", event_id="same-event",
                      event_type="DOOR_OPENED", received_at=datetime(2026, 10, 14, 0, 0),
                      payload={"data": {"door_state": "open"}})
-        self.cur.execute("SELECT count(*) FROM alarm_occurrences WHERE occurrence_kind='TRIGGERED'")
+        self.cur.execute("SELECT count(*) FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN' AND occurrence_kind='TRIGGERED'")
         self.assertEqual(self.cur.fetchone()[0], 1)
-        self.cur.execute("SELECT count(*) FROM alarm_outbox")
+        self.cur.execute("SELECT count(*) FROM alarm_outbox WHERE alarm_key IN (SELECT alarm_key FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN')")
         self.assertEqual(self.cur.fetchone()[0], 1)
 
     def test_heartbeat_reconciles_missing_open_and_close_events(self):

@@ -77,7 +77,10 @@ services:
   data-api:
     build: *app-build
     restart: unless-stopped
-    environment: *runtime_env
+    environment:
+      <<: *runtime_env
+      DP_INBOUND_TOKEN: ${DP_INBOUND_TOKEN:-mock-data-plane-inbound-token}
+      DP_INBOUND_ALLOWED_ORGS: ${DP_INBOUND_ALLOWED_ORGS:-demo,v13-test}
     ports:
       - "127.0.0.1:8002:8000"
     depends_on:
@@ -90,7 +93,11 @@ services:
     build: *app-build
     restart: unless-stopped
     environment:
+      <<: *runtime_env
       MOCK_NEXTGRP_TOKEN: mock-development-token
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: ["uvicorn", "mock_nextgrp:app", "--host", "0.0.0.0", "--port", "8080"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)"]
@@ -105,6 +112,10 @@ services:
       <<: *runtime_env
       OUTBOX_DELIVERY_ENABLED: "true"
       NEXTGRP_ALARM_URL: http://mock-nextgrp:8080/mock/v1/alarms
+      BRIDGE_ALARM_URL: http://mock-nextgrp:8080/internal/events/alarm
+      BRIDGE_STATUS_URL: http://mock-nextgrp:8080/internal/events/status
+      BRIDGE_OUTBOUND_TOKEN: ${BRIDGE_OUTBOUND_TOKEN:-mock-development-token}
+      BRIDGE_REQUIRE_202: "true"
       NEXTGRP_AUTH_MODE: bearer
       NEXTGRP_AUTH_TOKEN: mock-development-token
       NEXTGRP_ALLOW_INSECURE_MOCK: "true"
@@ -122,6 +133,25 @@ services:
       mock-nextgrp:
         condition: service_healthy
     command: ["python", "-u", "outbox_worker.py"]
+
+  snapshot-worker:
+    build: *app-build
+    restart: unless-stopped
+    environment:
+      <<: *runtime_env
+      BRIDGE_SNAPSHOT_URL: http://mock-nextgrp:8080/internal/snapshot
+      BRIDGE_OUTBOUND_TOKEN: ${BRIDGE_OUTBOUND_TOKEN:-mock-development-token}
+      BRIDGE_ALLOW_INSECURE_MOCK: "true"
+      BRIDGE_ALLOWED_ORGS: ${DP_INBOUND_ALLOWED_ORGS:-demo,v13-test}
+      SNAPSHOT_INTERVAL_SECONDS: "300"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-plane:
+        condition: service_started
+      mock-nextgrp:
+        condition: service_healthy
+    command: ["python", "-u", "snapshot_worker.py"]
 
   simulator:
     profiles: ["demo"]

@@ -19,8 +19,8 @@ class FakeStore:
         self.deliveries.append(args)
         return True
 
-    def failed(self, *args):
-        self.failures.append(args)
+    def failed(self, *args, **kwargs):
+        self.failures.append((args, kwargs))
         return True, False, 2.0
 
 

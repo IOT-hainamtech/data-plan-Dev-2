@@ -14,7 +14,7 @@ class DeliveryResult:
 
 class NextGrpAdapter:
     def __init__(self, url, timeout, auth_mode="bearer", token=None,
-                 api_key_header="X-API-Key", allow_insecure_mock=False):
+                 api_key_header="X-API-Key", allow_insecure_mock=False, require_202=False):
         if not url.startswith("https://") and not allow_insecure_mock:
             raise ValueError("NEXTGRP_ALARM_URL must use HTTPS")
         if auth_mode not in ("bearer", "api_key", "none"):
@@ -23,10 +23,12 @@ class NextGrpAdapter:
             raise ValueError("NEXTGRP_AUTH_TOKEN is required")
         self.url, self.timeout, self.auth_mode = url, timeout, auth_mode
         self.token, self.api_key_header = token, api_key_header
+        self.require_202 = require_202
 
     def send(self, alarm_key, payload):
+        event_id = payload.get("event_id", alarm_key)
         headers = {"Content-Type": "application/json", "Accept": "application/json",
-                   "Idempotency-Key": alarm_key}
+                   "Idempotency-Key": event_id}
         if self.auth_mode == "bearer":
             headers["Authorization"] = f"Bearer {self.token}"
         elif self.auth_mode == "api_key":

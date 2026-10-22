@@ -1,5 +1,6 @@
 """Durable M1 S1/S6 rule state machines using the caller's DB transaction."""
 import hashlib
+import uuid
 from datetime import timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -65,14 +66,38 @@ def door_should_fire(*, opened_at, now, hold_seconds, business_start,
 
 
 def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
-                      observed_at, episode_key, event_type, details):
+                      observed_at, episode_key, event_type, details, episode_started_at=None):
     alarm_key = _alarm_key(rule_code, device_id, episode_key, occurrence_kind)
-    payload = {
-        "alarm_key": alarm_key, "episode_key": episode_key, "schema_version": 1,
-        "rule_code": rule_code, "device_id": device_id, "severity": severity,
-        "occurrence_kind": occurrence_kind, "event_type": event_type,
-        "ts": observed_at.isoformat(timespec="milliseconds") + "Z", "details": details,
-    }
+    if occurrence_kind == "TRIGGERED":
+        started = episode_started_at or observed_at
+        wire_alarm_key = f"{rule_code}:{device_id}:{int(started.replace(tzinfo=timezone.utc).timestamp())}"
+        cur.execute("""INSERT INTO alarm_episode_mappings
+            (internal_episode_key,wire_alarm_key,episode_started_at,rule_code,device_id)
+            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(internal_episode_key) DO NOTHING""",
+            (episode_key,wire_alarm_key,started,rule_code,device_id))
+    cur.execute("SELECT wire_alarm_key,episode_started_at FROM alarm_episode_mappings WHERE internal_episode_key=%s",(episode_key,))
+    mapping=cur.fetchone()
+    wire_alarm_key=mapping[0] if mapping else alarm_key
+    episode_started=mapping[1] if mapping else (episode_started_at or observed_at)
+    delivery_event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"nextwireless:{alarm_key}"))
+    mapped_event = ({("S1", "TRIGGERED"): "TEMPERATURE_HIGH",
+                     ("S1", "CLEARED"): "TEMPERATURE_RECOVERED",
+                     ("S6", "TRIGGERED"): "DOOR_OPENED",
+                     ("S6", "CLEARED"): "DOOR_CLOSED"}
+                    .get((rule_code.split("_")[0], occurrence_kind), event_type))
+    cur.execute("""SELECT d.org_code,d.zone_code,r.config_version
+        FROM devices d JOIN rule_definitions r ON r.rule_code=%s WHERE d.device_id=%s""",
+        (rule_code,device_id))
+    org_code,zone_code,rule_version=cur.fetchone()
+    severity_wire={"INFO":"Low","WARNING":"Medium","HIGH":"High","CRITICAL":"Critical"}.get(severity,severity)
+    event_id=str(uuid.uuid5(uuid.NAMESPACE_URL,f"nextwireless:source:{alarm_key}"))
+    payload={"event_id":delivery_event_id,"org_code":org_code,"alarm_key":wire_alarm_key,
+        "episode_key":wire_alarm_key,"kind":occurrence_kind.lower(),"rule_id":rule_code,
+        "rule_version":max(1,rule_version),"device_id":device_id,"zone_code":zone_code,
+        "severity":severity_wire,"episode_start":episode_started.isoformat(timespec="milliseconds")+"Z",
+        "occurrence_seq":1,"event":{"event_id":event_id,"event_type":mapped_event,
+        "ts":observed_at.isoformat(timespec="milliseconds")+"Z","data":details}}
+    payload["raised_at" if occurrence_kind=="TRIGGERED" else "cleared_at"]=observed_at.isoformat(timespec="milliseconds")+"Z"
     cur.execute("""INSERT INTO alarm_occurrences
         (alarm_key,episode_key,occurrence_kind,rule_code,device_id,severity,event_type,
          triggered_at,cleared_at,payload_json)
@@ -84,9 +109,9 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
     if not cur.rowcount:
         return False
     cur.execute("""INSERT INTO alarm_outbox
-        (alarm_key,payload_json,next_attempt_at,created_at)
-        VALUES (%s,%s,%s,%s) ON CONFLICT (alarm_key) DO NOTHING""",
-        (alarm_key, Jsonb(payload), observed_at, observed_at))
+        (alarm_key,payload_json,next_attempt_at,created_at,delivery_event_id,wire_alarm_key)
+        VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (alarm_key) DO NOTHING""",
+        (alarm_key, Jsonb(payload), observed_at, observed_at, delivery_event_id, wire_alarm_key))
     return True
 
 
@@ -126,6 +151,7 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
                 alarms += int(_write_occurrence(
                     cur, rule_code=rule_code, device_id=device_id, severity=severity,
                     occurrence_kind="TRIGGERED", observed_at=received_at, episode_key=episode,
+                    episode_started_at=episode_started,
                     event_type="THRESHOLD_EXCEEDED",
                     details={"metric": metric, "value": value, "threshold": threshold,
                              "hold_seconds": hold_s, "hysteresis": hysteresis}))
@@ -239,6 +265,7 @@ def evaluate_due_rules(cur, now, device_id=None):
         created = _write_occurrence(
             cur, rule_code=code, device_id=dev, severity=severity,
             occurrence_kind="TRIGGERED", observed_at=now, episode_key=episode,
+            episode_started_at=opened_at,
             event_type="DOOR_OPEN_OUTSIDE_HOURS" if outside else "DOOR_OPEN_TOO_LONG",
             details={"device_event_id": source_event, "opened_at": opened_at.isoformat() + "Z",
                      "hold_seconds": hold_s, "schedule_timezone": tz_name})

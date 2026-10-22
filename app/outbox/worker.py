@@ -26,30 +26,33 @@ def retry_delay(attempt, base_seconds, max_seconds, jitter_ratio, rng=random.ran
     return max(0.0, raw + jitter)
 
 
-def validate_ack(body, alarm_key):
+def validate_ack(body, alarm_key, event_id=None):
     return (isinstance(body, dict) and body.get("accepted") is True
             and body.get("alarm_key") == alarm_key
+            and (event_id is None or body.get("event_id") == event_id)
             and isinstance(body.get("ack_id"), str) and bool(body["ack_id"]))
 
 
 class OutboxStore:
-    def __init__(self, connection_factory=db_connection, alarm_key=None):
+    def __init__(self, connection_factory=db_connection, alarm_key=None,
+                 table="alarm_outbox", key_column="alarm_key"):
         self.connection_factory = connection_factory
         self.alarm_key = alarm_key
+        self.table, self.key_column = table, key_column
 
     def claim(self, worker_id, batch_size, lease_seconds, at):
         with self.connection_factory() as conn:
             with conn.cursor() as cur:
-                cur.execute("""WITH candidates AS (
-                    SELECT id FROM alarm_outbox
+                cur.execute(f"""WITH candidates AS (
+                    SELECT id FROM {self.table}
                     WHERE ((delivery_state='PENDING' AND next_attempt_at <= %s)
                        OR (delivery_state='IN_FLIGHT' AND locked_until <= %s))
-                    """ + (" AND alarm_key=%s" if self.alarm_key else "") + """
+                    """ + (f" AND {self.key_column}=%s" if self.alarm_key else "") + f"""
                     ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT %s
-                ) UPDATE alarm_outbox o SET delivery_state='IN_FLIGHT',locked_by=%s,
+                ) UPDATE {self.table} o SET delivery_state='IN_FLIGHT',locked_by=%s,
                     locked_until=%s,attempt_count=o.attempt_count+1,last_error=NULL
                   FROM candidates c WHERE o.id=c.id
-                  RETURNING o.id,o.alarm_key,o.payload_json,o.attempt_count""",
+                  RETURNING o.id,o.{self.key_column},o.payload_json,o.attempt_count""",
                     ((at, at, self.alarm_key, batch_size, worker_id,
                       at + timedelta(seconds=lease_seconds)) if self.alarm_key else
                      (at, at, batch_size, worker_id, at + timedelta(seconds=lease_seconds))))
@@ -60,7 +63,7 @@ class OutboxStore:
     def delivered(self, row_id, worker_id, ack_id, status, at):
         with self.connection_factory() as conn:
             with conn.cursor() as cur:
-                cur.execute("""UPDATE alarm_outbox SET delivery_state='DELIVERED',
+                cur.execute(f"""UPDATE {self.table} SET delivery_state='DELIVERED',
                     delivered_at=%s,acked_at=%s,ack_id=%s,last_http_status=%s,
                     locked_by=NULL,locked_until=NULL,last_error=NULL
                     WHERE id=%s AND delivery_state='IN_FLIGHT' AND locked_by=%s""",
@@ -70,12 +73,13 @@ class OutboxStore:
         return bool(changed)
 
     def failed(self, row_id, worker_id, attempt, error, status, at,
-               max_attempts, base_seconds, max_seconds, jitter_ratio, rng=random.random):
-        terminal = attempt >= max_attempts
+               max_attempts, base_seconds, max_seconds, jitter_ratio, rng=random.random,
+               force_terminal=False):
+        terminal = force_terminal or attempt >= max_attempts
         delay = retry_delay(attempt, base_seconds, max_seconds, jitter_ratio, rng)
         with self.connection_factory() as conn:
             with conn.cursor() as cur:
-                cur.execute("""UPDATE alarm_outbox SET delivery_state=%s,failure_count=failure_count+1,
+                cur.execute(f"""UPDATE {self.table} SET delivery_state=%s,failure_count=failure_count+1,
                     next_attempt_at=%s,last_error=%s,last_http_status=%s,
                     locked_by=NULL,locked_until=NULL
                     WHERE id=%s AND delivery_state='IN_FLIGHT' AND locked_by=%s""",
@@ -88,12 +92,12 @@ class OutboxStore:
     def metrics(self, at):
         with self.connection_factory() as conn:
             with conn.cursor() as cur:
-                cur.execute("""SELECT
+                cur.execute(f"""SELECT
                     count(*) FILTER (WHERE delivery_state IN ('PENDING','IN_FLIGHT')),
                     count(*) FILTER (WHERE delivery_state='FAILED'),
                     COALESCE(sum(failure_count),0),
                     min(created_at) FILTER (WHERE delivery_state IN ('PENDING','IN_FLIGHT'))
-                    FROM alarm_outbox""")
+                    FROM {self.table}""")
                 pending, failed, failures, oldest = cur.fetchone()
         age = max(0.0, (at - oldest).total_seconds()) if oldest else 0.0
         return {"pending": pending, "failed": failed, "delivery_failures": failures,
@@ -117,7 +121,10 @@ class OutboxWorker:
             try:
                 result = self.adapter.send(alarm_key, payload)
                 status = result.status
-                if not (200 <= status < 300) or not validate_ack(result.body, alarm_key):
+                event_id=payload.get("event_id") if isinstance(payload,dict) else None
+                expected_alarm=payload.get("alarm_key",str(alarm_key)) if isinstance(payload,dict) else str(alarm_key)
+                status_ok = status == 202 if getattr(self.adapter,"require_202",False) else 200 <= status < 300
+                if not status_ok or not validate_ack(result.body, expected_alarm, event_id):
                     raise ValueError(f"invalid ACK (HTTP {status})")
                 self.store.delivered(row_id, self.worker_id, result.body["ack_id"], status, now_utc())
                 LOG.info("ACK alarm_key=%s attempt=%d ack_id=%s", alarm_key, attempt,
@@ -125,7 +132,8 @@ class OutboxWorker:
             except Exception as exc:
                 changed, terminal, delay = self.store.failed(
                     row_id, self.worker_id, attempt, exc, status, now_utc(), self.max_attempts,
-                    self.base_seconds, self.max_seconds, self.jitter_ratio)
+                    self.base_seconds, self.max_seconds, self.jitter_ratio,
+                    force_terminal=status in (400,401,403,409,422))
                 if changed:
                     LOG.warning("DELIVERY_FAILED alarm_key=%s attempt=%d terminal=%s retry_in=%.2fs error=%s",
                                 alarm_key, attempt, terminal, delay, exc)
@@ -140,10 +148,10 @@ def main():
     if not _env_bool("OUTBOX_DELIVERY_ENABLED"):
         raise SystemExit("OUTBOX_DELIVERY_ENABLED is false; refusing external delivery")
     adapter = NextGrpAdapter(
-        os.environ["NEXTGRP_ALARM_URL"], float(os.getenv("NEXTGRP_TIMEOUT_SECONDS", "5")),
+        os.getenv("BRIDGE_ALARM_URL",os.environ["NEXTGRP_ALARM_URL"]), float(os.getenv("NEXTGRP_TIMEOUT_SECONDS", "5")),
         os.getenv("NEXTGRP_AUTH_MODE", "bearer"), os.getenv("NEXTGRP_AUTH_TOKEN"),
         os.getenv("NEXTGRP_API_KEY_HEADER", "X-API-Key"),
-        _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"))
+        _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"), require_202=_env_bool("BRIDGE_REQUIRE_202",True))
     worker = OutboxWorker(
         OutboxStore(), adapter, batch_size=int(os.getenv("OUTBOX_BATCH_SIZE", "20")),
         lease_seconds=int(os.getenv("OUTBOX_LEASE_SECONDS", "60")),
@@ -151,12 +159,20 @@ def main():
         base_seconds=float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS", "2")),
         max_seconds=float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS", "300")),
         jitter_ratio=float(os.getenv("OUTBOX_BACKOFF_JITTER", "0.2")))
+    status_adapter = NextGrpAdapter(
+        os.getenv("BRIDGE_STATUS_URL",os.getenv("BRIDGE_ALARM_URL",os.environ["NEXTGRP_ALARM_URL"])),
+        float(os.getenv("NEXTGRP_TIMEOUT_SECONDS","5")),"bearer",os.getenv("BRIDGE_OUTBOUND_TOKEN",os.getenv("NEXTGRP_AUTH_TOKEN")),
+        allow_insecure_mock=_env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"),require_202=_env_bool("BRIDGE_REQUIRE_202",True))
+    status_worker = OutboxWorker(OutboxStore(table="status_outbox",key_column="delivery_event_id"),status_adapter,
+        batch_size=int(os.getenv("OUTBOX_BATCH_SIZE","20")),lease_seconds=int(os.getenv("OUTBOX_LEASE_SECONDS","60")),
+        max_attempts=int(os.getenv("OUTBOX_MAX_ATTEMPTS","8")),base_seconds=float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS","2")),
+        max_seconds=float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS","300")),jitter_ratio=float(os.getenv("OUTBOX_BACKOFF_JITTER","0.2")))
     poll = max(0.1, float(os.getenv("OUTBOX_POLL_SECONDS", "1")))
     metrics_interval = max(1.0, float(os.getenv("OUTBOX_METRICS_SECONDS", "30")))
     next_metrics = 0.0
     while True:
         try:
-            processed = worker.run_once()
+            processed = worker.run_once() + status_worker.run_once()
             monotonic = time.monotonic()
             if monotonic >= next_metrics:
                 LOG.info("OUTBOX_METRICS %s", json.dumps(worker.store.metrics(now_utc())))

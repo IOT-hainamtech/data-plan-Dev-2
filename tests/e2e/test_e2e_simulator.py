@@ -140,6 +140,7 @@ class EndToEndSimulatorTests(unittest.TestCase):
         self.alarm_keys.append(alarm_key)
 
         # Deliver this exact alarm and require a valid ACK from mock nextGRP.
+        self.worker.store = OutboxStore(alarm_key=alarm_key)
         self.worker.run_once()
         deadline = time.monotonic() + 5
         delivery_state = ack_id = None
@@ -216,12 +217,13 @@ class EndToEndSimulatorTests(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("""SELECT alarm_key FROM alarm_occurrences
                     WHERE rule_code='S6_DOOR_OPEN' AND device_id='DR-001'
-                      AND payload_json->'details'->>'device_event_id'=%s""", (event_id,))
+                      AND payload_json->'event'->'data'->>'device_event_id'=%s""", (event_id,))
                 occurrence = cur.fetchone()
         self.assertIsNotNone(occurrence, "S6 event did not create an alarm occurrence")
         self.alarm_keys.append(occurrence[0])
 
         # Run outbox worker to deliver any pending outbox rows to mock nextGRP
+        self.worker.store = OutboxStore(alarm_key=occurrence[0])
         self.worker.run_once()
         deadline = time.monotonic() + 5
         delivery_state = ack_id = None

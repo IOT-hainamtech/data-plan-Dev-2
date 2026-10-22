@@ -40,6 +40,10 @@ def validate_telemetry_data(payload, point_definitions=None):
         return quality, data
     if not data:
         raise ValueError("good telemetry requires measurements")
+    missing = {name for name, definition in definitions.items()
+               if definition.get("required") and name not in data}
+    if missing:
+        raise ValueError(f"required telemetry missing: {','.join(sorted(missing))}")
     for metric, value in data.items():
         definition = definitions[metric]
         if definition["data_type"] == "number":

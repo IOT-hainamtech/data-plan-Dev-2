@@ -1,14 +1,17 @@
 """Transactional device presence operations."""
 import logging
+import uuid
+from psycopg.types.json import Jsonb
 
 LOG = logging.getLogger("data-plane")
 
 
 def update_device_presence(cur, *, device_id, boot_id, received_at, explicit_state=None):
-    cur.execute("SELECT current_state FROM device_status WHERE device_id=%s FOR UPDATE", (device_id,))
+    cur.execute("SELECT current_state,last_seen_at FROM device_status WHERE device_id=%s FOR UPDATE", (device_id,))
     row = cur.fetchone()
     target_state = explicit_state or "online"
     previous = row[0] if row else None
+    previous_last_seen = row[1] if row else None
     inserted = 0
     if previous != target_state:
         cur.execute("""INSERT INTO device_status_history
@@ -22,6 +25,17 @@ def update_device_presence(cur, *, device_id, boot_id, received_at, explicit_sta
           last_seen_at=COALESCE(EXCLUDED.last_seen_at,device_status.last_seen_at)""",
         (device_id, target_state, received_at, boot_id,
          received_at if target_state == "online" else None))
+    if previous != target_state:
+        cur.execute("SELECT org_code FROM devices WHERE device_id=%s",(device_id,))
+        org=cur.fetchone()[0]; event_id=str(uuid.uuid5(uuid.NAMESPACE_URL,f"nextwireless:status:{device_id}:{target_state}:{received_at.isoformat()}"))
+        last_seen=received_at if target_state=="online" else previous_last_seen
+        payload={"event_id":event_id,"org_code":org,"device_id":device_id,"state":target_state,
+                 "since":received_at.isoformat(timespec="milliseconds")+"Z",
+                 "last_seen":last_seen.isoformat(timespec="milliseconds")+"Z" if last_seen else None,
+                 "reason":"lwt" if explicit_state=="offline" else "telemetry"}
+        cur.execute("""INSERT INTO status_outbox(delivery_event_id,device_id,payload_json,next_attempt_at,created_at)
+            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(delivery_event_id) DO NOTHING""",
+            (event_id,device_id,Jsonb(payload),received_at,received_at))
     return inserted
 
 
@@ -36,6 +50,13 @@ def reconcile_device_timeouts(cur, now, device_id=None):
             VALUES (%s,'offline',%s,%s)""", (dev_id, now, boot_id))
         cur.execute("UPDATE device_status SET current_state='offline',received_at=%s WHERE device_id=%s",
                     (now, dev_id))
+        cur.execute("SELECT org_code FROM devices WHERE device_id=%s",(dev_id,))
+        org=cur.fetchone()[0]; event_id=str(uuid.uuid5(uuid.NAMESPACE_URL,f"nextwireless:status:{dev_id}:offline:{now.isoformat()}"))
+        payload={"event_id":event_id,"org_code":org,"device_id":dev_id,"state":"offline",
+                 "since":now.isoformat(timespec="milliseconds")+"Z",
+                 "last_seen":last_seen.isoformat(timespec="milliseconds")+"Z","reason":"timeout"}
+        cur.execute("""INSERT INTO status_outbox(delivery_event_id,device_id,payload_json,next_attempt_at,created_at)
+            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(delivery_event_id) DO NOTHING""",(event_id,dev_id,Jsonb(payload),now,now))
         LOG.warning("DEVICE_OFFLINE_TIMEOUT device=%s last_seen=%s age=%.1fs timeout=%ds",
                     dev_id, last_seen, (now-last_seen).total_seconds(), timeout_seconds)
     return len(rows)

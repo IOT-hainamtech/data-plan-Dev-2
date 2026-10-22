@@ -24,6 +24,10 @@ class StatusTrackerTests(unittest.TestCase):
     def tearDown(self):
         with db_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM status_outbox WHERE device_id=%s", (self.dev_id,))
+                cur.execute("DELETE FROM alarm_outbox WHERE alarm_key IN (SELECT alarm_key FROM alarm_occurrences WHERE device_id=%s)", (self.dev_id,))
+                cur.execute("DELETE FROM alarm_occurrences WHERE device_id=%s", (self.dev_id,))
+                cur.execute("DELETE FROM rule_runtime_state WHERE device_id=%s", (self.dev_id,))
                 cur.execute("DELETE FROM device_status_history WHERE device_id=%s", (self.dev_id,))
                 cur.execute("DELETE FROM device_status WHERE device_id=%s", (self.dev_id,))
                 cur.execute("DELETE FROM telemetry WHERE device_id=%s", (self.dev_id,))

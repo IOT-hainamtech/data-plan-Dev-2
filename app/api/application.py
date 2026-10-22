@@ -7,16 +7,16 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from datetime import datetime, timezone
 
+from core.auth import service_context
 from core.database import db_connection
+from api.integration import router as integration_router
 
 app = FastAPI(title="nextWireless L2A Data Plane (local PoC)", version="0.1.0")
 
 
-def tenant_org(x_org_code: str | None = Header(default=None, alias="X-Org-Code")):
-    """Development tenant context; replace with verified nextGRP identity/RBAC."""
-    if not x_org_code:
-        raise HTTPException(status_code=401, detail="X-Org-Code tenant header required")
-    return x_org_code
+tenant_org = service_context
+
+app.include_router(integration_router)
 
 
 def utc_now():
@@ -106,6 +106,20 @@ def list_devices(org_code: str = Depends(tenant_org)):
          "boot_id": r["boot_id"]}
         for r in rows
     ]}
+@app.get("/api/v1/zones/{zone_code}/summary")
+def zone_summary(zone_code: str, site_code: str = Query(...), org_code: str = Depends(tenant_org)):
+    """Site is required because zone_code is only unique within an organization/site."""
+    with db_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT z.display_name,count(d.device_id) AS device_count,
+                count(d.device_id) FILTER (WHERE s.current_state='online') AS online_count,
+                count(d.device_id) FILTER (WHERE s.current_state='offline' OR s.current_state IS NULL) AS offline_count
+                FROM zones z LEFT JOIN devices d ON (d.org_code,d.site_code,d.zone_code)=(z.org_code,z.site_code,z.zone_code)
+                LEFT JOIN device_status s ON s.device_id=d.device_id
+                WHERE z.org_code=%s AND z.site_code=%s AND z.zone_code=%s
+                GROUP BY z.display_name""",(org_code,site_code,zone_code)); row=cur.fetchone()
+    if not row: raise HTTPException(404,"Zone not found")
+    return {"org_code":org_code,"site_code":site_code,"zone_code":zone_code,**row}
 @app.get("/api/v1/devices/{device_id}/status")
 def device_status_detail(device_id: str, history_limit: int = Query(default=20, ge=1, le=100),
                          org_code: str = Depends(tenant_org)):
