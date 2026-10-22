@@ -45,6 +45,9 @@ Hướng thiết kế dài hạn: dữ liệu từ các thiết bị và đườ
 - **Kiểm thử:** migration 001–007, ingestion, Rule Engine, Status Tracker, Outbox Worker, MQTT security và luồng End-to-End đã được thử nghiệm với PostgreSQL/TimescaleDB và API nextGRP giả lập (mock).
 - **MQTT security:** TLS 1.2+, kiểm tra certificate, tài khoản riêng, ACL theo
   thiết bị, QoS 1, retained status, LWT và tự động reconnect.
+- **Multi-organization registry:** Organization/Site/Zone, Device Profile và cấu hình thiết bị
+  được quản lý bằng migration 008; ingestion xác thực route theo registry và rule hỗ trợ scope
+  Device/Profile/Zone/Site/Organization với runtime độc lập cho từng thiết bị.
 
 > **Lưu ý:** Trạng thái `DELIVERED` trong môi trường demo chỉ xác nhận API **mock** đã nhận cảnh báo; **không có nghĩa cảnh báo đã được gửi tới nextGRP thật**.
 
@@ -102,13 +105,18 @@ Các endpoint dữ liệu hiện có:
 ```text
 GET /api/v1/health
 GET /api/v1/outbox/metrics
-GET /api/v1/devices
+GET /api/v1/devices                       # header: X-Org-Code: demo
 GET /api/v1/devices/{device_id}/latest
 GET /api/v1/devices/{device_id}/telemetry?limit=5
 GET /api/v1/devices/{device_id}/status
 GET /api/v1/devices/{device_id}/events
-GET /api/v1/alarms
+GET /api/v1/alarms                        # header: X-Org-Code: demo
 ```
+
+Các endpoint dữ liệu thiết bị/alarm yêu cầu header `X-Org-Code`. Đây chỉ là tenant context giả lập
+cho local PoC, không phải authentication/RBAC production. Xem thiết kế và ranh giới Dev1 tại
+[`docs/MULTI_ORG_SITE_DESIGN.md`](docs/MULTI_ORG_SITE_DESIGN.md) và
+[`docs/DEV1_DATA_PLANE_INTEGRATION.md`](docs/DEV1_DATA_PLANE_INTEGRATION.md).
 
 Kiểm thử MQTT security cần tạm dừng simulator để tránh cạnh tranh retained status:
 
@@ -142,7 +150,7 @@ docker compose --profile mqtt-test run --rm `
 docker compose start simulator
 ```
 
-Kiểm tra migration 001–007 trên PostgreSQL test tách biệt:
+Kiểm tra migration 001–008 trên PostgreSQL test tách biệt:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test-migrations-fresh.ps1
@@ -195,12 +203,14 @@ compose.yaml         Cấu hình Docker Compose
 ## Giới hạn hiện tại và kế hoạch phát triển
 
 - [x] MQTT TLS 1.2+, tài khoản riêng và ACL thiết bị cho development.
-- [x] Migration 001–007, Device Status Tracker timeout, LWT/reconnect và durable outbox recovery.
+- [x] Migration 001–008, registry nhiều Organization/Site/Zone, profile-driven ingestion,
+  scoped rules, Device Status Tracker timeout, LWT/reconnect và durable outbox recovery.
 - [x] End-to-End bằng Simulator cho S1, S6, Alarm, Outbox và Mock nextGRP ACK.
 - [ ] Flash và kiểm thử firmware ESP32/SHT31, MC-38 trên phần cứng thực tế.
 - [ ] Tích hợp API và đồng bộ Device/Profile/Rule/Status/Alarm thật với nextGRP (IF-01 đến IF-07).
 - [ ] Nghiệm thu phần cứng FT-01 đến FT-12 và kiểm thử soak/recovery trên thiết bị thật.
-- [ ] Hoàn thiện mô hình mở rộng nhiều Organization/Site/Zone; seed M1 hiện dùng `demo/demo-site`.
+- [x] Mô hình Data Plane nhiều Organization/Site/Zone với tenant-filtered local API; authentication,
+  RBAC và đồng bộ control-plane thật vẫn chờ contract Dev1/nextGRP.
 - [ ] Bổ sung chính sách retention, metrics/alert vận hành, backup/restore và benchmark mở rộng.
 - [ ] Nghiên cứu Gateway/Protocol Adapter cho thiết bị công nghiệp và kết nối 4G/5G.
 

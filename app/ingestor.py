@@ -52,9 +52,13 @@ def require_int(value, name):
         raise ValueError(f"{name} must be a non-negative integer")
 
 
-def validate_telemetry_data(payload):
+def validate_telemetry_data(payload, point_definitions=None):
     data = payload["data"]
-    allowed = {"temperature", "humidity"}
+    definitions = point_definitions or {
+        "temperature": {"data_type": "number", "min_value": -20, "max_value": 80},
+        "humidity": {"data_type": "number", "min_value": 0, "max_value": 100},
+    }
+    allowed = set(definitions)
     quality = payload.get("quality", "good")
     if quality not in ("good", "error"):
         raise ValueError("quality must be good or error")
@@ -67,17 +71,40 @@ def validate_telemetry_data(payload):
         return quality, metrics
     if not metrics:
         raise ValueError("good telemetry requires measurements")
+    for metric, value in metrics.items():
+        definition = definitions[metric]
+        if definition["data_type"] == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{metric} must be numeric")
+            if not (float('-inf') < value < float('inf')):
+                raise ValueError("non-finite metric")
+            minimum, maximum = definition.get("min_value"), definition.get("max_value")
+            if minimum is not None and value < minimum or maximum is not None and value > maximum:
+                raise ValueError(f"{metric} out of range")
     return quality, metrics
 
 
-def door_heartbeat_event(profile, body):
+def load_profile_contract(cur, profile, channel):
+    cur.execute("""SELECT point_code,data_type,min_value,max_value,allowed_values,required
+        FROM device_profile_points WHERE profile_code=%s AND channel=%s""", (profile, channel))
+    definitions = {}
+    for code, data_type, minimum, maximum, allowed, required in cur.fetchall():
+        definitions[code] = {"data_type": data_type, "min_value": minimum,
+                             "max_value": maximum, "allowed_values": allowed,
+                             "required": required}
+    return definitions
+
+
+def door_heartbeat_event(profile, body, event_types=None):
     door_state = body["data"].get("door_state")
     if door_state is None:
         return None
-    if profile != "DOOR_SENSOR" or door_state not in ("open", "closed"):
+    mapping = event_types or ({"open": "DOOR_OPENED", "closed": "DOOR_CLOSED"}
+                              if profile == "DOOR_SENSOR" else {})
+    if door_state not in mapping:
         raise ValueError("invalid door heartbeat")
     return (f"heartbeat:{body['boot_id']}:{body['seq']}",
-            "DOOR_OPENED" if door_state == "open" else "DOOR_CLOSED")
+            mapping[door_state])
 
 
 def validate_message(topic, payload):
@@ -172,9 +199,10 @@ def save_message(topic, body):
         profile = record[0]
         inserted = 0
         if channel == "telemetry":
-            if profile != "TEMP_HUM_SENSOR":
+            point_definitions = load_profile_contract(cur, profile, "telemetry")
+            if not point_definitions:
                 raise ValueError("telemetry not supported by device profile")
-            quality, metrics = validate_telemetry_data(body)
+            quality, metrics = validate_telemetry_data(body, point_definitions)
             cur.execute("""INSERT INTO telemetry_reports
                 (device_id,boot_id,seq,quality,measured_at,received_at,payload_json)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
@@ -186,14 +214,6 @@ def save_message(topic, body):
             inserted = 1
             update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
             for metric, value in metrics.items():
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    raise ValueError(f"{metric} must be numeric")
-                if not (float('-inf') < value < float('inf')):
-                    raise ValueError("non-finite metric")
-                if metric == "temperature" and not -20 <= value <= 80:
-                    raise ValueError("temperature out of range")
-                if metric == "humidity" and not 0 <= value <= 100:
-                    raise ValueError("humidity out of range")
                 cur.execute("""INSERT INTO telemetry
                     (device_id, boot_id, seq, metric, value_number, measured_at, received_at, ts_source)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (device_id, metric, measured_at) DO NOTHING""",
@@ -204,11 +224,14 @@ def save_message(topic, body):
                     on_telemetry(cur, device_id=device, metric=metric, value=float(value),
                                  measured_at=stamp, received_at=received)
         elif channel == "event":
-            if profile != "DOOR_SENSOR":
-                raise ValueError("event not supported by device profile")
-            expected = {"DOOR_OPENED": "open", "DOOR_CLOSED": "closed"}
             event_type = body["event_type"]
-            if event_type not in expected or body["data"].get("door_state") != expected[event_type]:
+            cur.execute("""SELECT state_point,state_value FROM device_profile_events
+                WHERE profile_code=%s AND event_type=%s""", (profile, event_type))
+            event_contract = cur.fetchone()
+            if event_contract is None:
+                raise ValueError("event not supported by device profile")
+            state_point, state_value = event_contract
+            if state_point and body["data"].get(state_point) != state_value:
                 raise ValueError("invalid door event")
             cur.execute("""INSERT INTO device_events
                 (device_id,event_id,event_type,boot_id,seq,event_at,received_at,payload_json)
@@ -225,7 +248,11 @@ def save_message(topic, body):
             state = body["state"]
             inserted = update_device_presence(cur, device_id=device, boot_id=body["boot_id"],
                                               received_at=received, explicit_state=state)
-            heartbeat = door_heartbeat_event(profile, body)
+            points = load_profile_contract(cur, profile, "status")
+            cur.execute("""SELECT state_value,event_type FROM device_profile_events
+                WHERE profile_code=%s AND state_point='door_state'""", (profile,))
+            event_types = dict(cur.fetchall())
+            heartbeat = door_heartbeat_event(profile, body, event_types) if "door_state" in points else None
             if heartbeat:
                 heartbeat_id, heartbeat_type = heartbeat
                 on_event(cur, device_id=device, event_id=heartbeat_id,

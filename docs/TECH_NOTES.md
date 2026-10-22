@@ -35,3 +35,6 @@
 - Migration `005_urd_alignment.sql` records telemetry reports idempotently by
   `(device_id, boot_id, seq)`, including top-level SHT31 `quality=error` without fabricated
   measurements. DR-001 status heartbeats reconcile missed door transitions.
+- Migration `008_multi_site_registry.sql` keeps `device_id` globally unique and adds the
+  Organization/Site/Zone registry, data-driven profile contracts and five rule scopes. Tenant data
+  API calls use a development-only `X-Org-Code` header; verified identity/RBAC remains a Dev1 task.

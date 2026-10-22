@@ -14,6 +14,16 @@ def _alarm_key(rule_code, device_id, source_key, occurrence_kind="TRIGGERED"):
     return f"m1:{rule_code}:{_key(rule_code, device_id, source_key, occurrence_kind)}"
 
 
+SCOPE_MATCH = """(
+    (r.scope_type='DEVICE' AND r.device_id=v.device_id) OR
+    (r.scope_type='PROFILE' AND r.scope_profile_code=v.profile_code) OR
+    (r.scope_type='ZONE' AND r.scope_org_code=v.org_code AND r.scope_site_code=v.site_code
+        AND r.scope_zone_code=v.zone_code) OR
+    (r.scope_type='SITE' AND r.scope_org_code=v.org_code AND r.scope_site_code=v.site_code) OR
+    (r.scope_type='ORGANIZATION' AND r.scope_org_code=v.org_code)
+)"""
+
+
 def threshold_transition(*, value, threshold, hysteresis, hold_seconds,
                          clear_hold_seconds, observed_at, entered_at,
                          recovery_started_at, active):
@@ -81,10 +91,11 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
 
 
 def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
-    cur.execute("""SELECT rule_code,threshold_value,hysteresis_value,hold_seconds,
-            clear_hold_seconds,quiet_seconds,severity FROM rule_definitions
-            WHERE device_id=%s AND rule_kind='THRESHOLD' AND metric=%s AND enabled=TRUE
-            ORDER BY rule_code""", (device_id, metric))
+    cur.execute(f"""SELECT r.rule_code,r.threshold_value,r.hysteresis_value,r.hold_seconds,
+            r.clear_hold_seconds,r.quiet_seconds,r.severity FROM rule_definitions r
+            CROSS JOIN devices v WHERE v.device_id=%s AND r.rule_kind='THRESHOLD'
+            AND r.metric=%s AND r.enabled=TRUE AND {SCOPE_MATCH}
+            ORDER BY r.rule_code""", (device_id, metric))
     alarms = 0
     for rule_code, threshold, hysteresis, hold_s, clear_s, quiet_s, severity in cur.fetchall():
         if threshold is None or hysteresis < 0:
@@ -143,10 +154,11 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
 def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
              observed_at=None):
     observed_at = observed_at or received_at
-    cur.execute("""SELECT rule_code,severity,hold_seconds,clear_hold_seconds,quiet_seconds,
-            business_start,business_end,schedule_timezone FROM rule_definitions
-            WHERE device_id=%s AND rule_kind='STATE_CHANGE' AND enabled=TRUE
-              AND event_type='DOOR_OPENED' ORDER BY rule_code""", (device_id,))
+    cur.execute(f"""SELECT r.rule_code,r.severity,r.hold_seconds,r.clear_hold_seconds,r.quiet_seconds,
+            r.business_start,r.business_end,r.schedule_timezone FROM rule_definitions r
+            CROSS JOIN devices v WHERE v.device_id=%s AND r.rule_kind='STATE_CHANGE'
+              AND r.enabled=TRUE AND r.event_type='DOOR_OPENED' AND {SCOPE_MATCH}
+            ORDER BY r.rule_code""", (device_id,))
     changes = 0
     for rule_code, severity, hold_s, clear_s, quiet_s, start, end, tz_name in cur.fetchall():
         if start is None or end is None or not tz_name:
@@ -188,13 +200,13 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
 
 def evaluate_due_rules(cur, now, device_id=None):
     # Complete configured delayed door clears first.
-    cur.execute("""SELECT d.rule_code,d.device_id,d.severity,d.clear_hold_seconds,
+    cur.execute("""SELECT d.rule_code,s.device_id,d.severity,d.clear_hold_seconds,
             s.recovery_started_at,s.episode_key,s.source_event_id
         FROM rule_definitions d JOIN rule_runtime_state s
-          ON s.rule_code=d.rule_code AND s.device_id=d.device_id
+          ON s.rule_code=d.rule_code
         WHERE d.enabled=TRUE AND d.rule_kind='STATE_CHANGE' AND s.current_state='closed'
           AND s.is_active=TRUE AND s.recovery_started_at IS NOT NULL
-          AND (%s::text IS NULL OR d.device_id=%s) FOR UPDATE OF s""", (device_id, device_id))
+          AND (%s::text IS NULL OR s.device_id=%s) FOR UPDATE OF s""", (device_id, device_id))
     fired = 0
     for code, dev, severity, clear_s, recovery, episode, source_event in cur.fetchall():
         if (now - recovery).total_seconds() < clear_s:
@@ -207,13 +219,13 @@ def evaluate_due_rules(cur, now, device_id=None):
         cur.execute("""UPDATE rule_runtime_state SET is_active=FALSE,episode_key=NULL,
             episode_started_at=NULL,recovery_started_at=NULL
             WHERE rule_code=%s AND device_id=%s""", (code, dev))
-    cur.execute("""SELECT d.rule_code,d.device_id,d.severity,d.hold_seconds,d.quiet_seconds,
+    cur.execute("""SELECT d.rule_code,s.device_id,d.severity,d.hold_seconds,d.quiet_seconds,
             d.business_start,d.business_end,d.schedule_timezone,s.state_changed_at,
             s.last_fired_at,s.episode_key,s.source_event_id
         FROM rule_definitions d JOIN rule_runtime_state s
-          ON s.rule_code=d.rule_code AND s.device_id=d.device_id
+          ON s.rule_code=d.rule_code
         WHERE d.enabled=TRUE AND d.rule_kind='STATE_CHANGE' AND s.current_state='open'
-          AND s.is_active=FALSE AND (%s::text IS NULL OR d.device_id=%s)
+          AND s.is_active=FALSE AND (%s::text IS NULL OR s.device_id=%s)
         FOR UPDATE OF s""", (device_id, device_id))
     for code, dev, severity, hold_s, quiet_s, start, end, tz_name, opened_at, last_fired, episode, source_event in cur.fetchall():
         if not all((start, end, tz_name, opened_at, episode)):
