@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from datetime import datetime, timezone
 
-from ingestor import db_connection
+from core.database import db_connection
 
 app = FastAPI(title="nextWireless L2A Data Plane (local PoC)", version="0.1.0")
 

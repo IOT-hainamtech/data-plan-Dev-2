@@ -1,4 +1,4 @@
-"""End-to-End Integration Tests using simulated MQTT TLS clients, Ingestion, Database, Rule Engine, Outbox Worker, and Mock nextGRP."""
+"""End-to-end MQTT, ingestion, database, rules, outbox and mock nextGRP tests."""
 import json
 import os
 import ssl
@@ -10,8 +10,10 @@ from datetime import datetime, timedelta, timezone
 
 import paho.mqtt.client as mqtt
 
-from ingestor import db_connection, now_utc
-from outbox_worker import NextGrpAdapter, OutboxStore, OutboxWorker
+from core.clock import now_utc
+from core.database import db_connection
+from integrations.nextgrp import NextGrpAdapter
+from outbox.worker import OutboxStore, OutboxWorker
 
 
 def stamp():
@@ -63,6 +65,7 @@ class EndToEndSimulatorTests(unittest.TestCase):
         self.boot_id = f"e2e-{uuid.uuid4().hex[:8]}"
         self.alarm_keys = []
         self.s6_runtime_snapshot = None
+        self.s6_schedule_snapshot = None
         self.store = OutboxStore()
         self.adapter = NextGrpAdapter(
             self.mock_url, timeout=5, auth_mode="bearer", token=self.mock_token,
@@ -86,6 +89,10 @@ class EndToEndSimulatorTests(unittest.TestCase):
                         current_state=%s,state_changed_at=%s,source_event_id=%s
                         WHERE rule_code='S6_DOOR_OPEN' AND device_id='DR-001'""",
                         self.s6_runtime_snapshot)
+                if self.s6_schedule_snapshot is not None:
+                    cur.execute("""UPDATE rule_definitions SET business_start=%s,
+                        business_end=%s, schedule_timezone=%s
+                        WHERE rule_code='S6_DOOR_OPEN'""", self.s6_schedule_snapshot)
             conn.commit()
 
     def test_e2e_s1_telemetry_flow_and_outbox_delivery(self):
@@ -113,9 +120,9 @@ class EndToEndSimulatorTests(unittest.TestCase):
         client.disconnect(); client.loop_stop()
 
         # Wait for all reports and the S1 occurrence to be persisted.
-        deadline = time.time() + 8
+        deadline = time.monotonic() + 8
         alarm_key = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT count(*) FROM telemetry_reports WHERE boot_id=%s", (self.boot_id,))
@@ -134,9 +141,9 @@ class EndToEndSimulatorTests(unittest.TestCase):
 
         # Deliver this exact alarm and require a valid ACK from mock nextGRP.
         self.worker.run_once()
-        deadline = time.time() + 5
+        deadline = time.monotonic() + 5
         delivery_state = ack_id = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT delivery_state, ack_id FROM alarm_outbox WHERE alarm_key=%s", (alarm_key,))
@@ -163,6 +170,14 @@ class EndToEndSimulatorTests(unittest.TestCase):
                     state_changed_at,source_event_id FROM rule_runtime_state
                     WHERE rule_code='S6_DOOR_OPEN' AND device_id='DR-001' FOR UPDATE""")
                 self.s6_runtime_snapshot = cur.fetchone()
+                cur.execute("""SELECT business_start,business_end,schedule_timezone
+                    FROM rule_definitions WHERE rule_code='S6_DOOR_OPEN' FOR UPDATE""")
+                self.s6_schedule_snapshot = cur.fetchone()
+                # An equal start/end is an empty business-hours interval. This
+                # keeps the outside-hours E2E path deterministic at any wall-clock time.
+                cur.execute("""UPDATE rule_definitions SET business_start=TIME '00:00:00',
+                    business_end=TIME '00:00:00'
+                    WHERE rule_code='S6_DOOR_OPEN'""")
                 cur.execute("""UPDATE rule_runtime_state SET current_state='closed',
                     state_changed_at=NULL,is_active=FALSE,last_fired_at=NULL,
                     recovery_started_at=NULL,episode_key=NULL,episode_started_at=NULL,
@@ -185,9 +200,9 @@ class EndToEndSimulatorTests(unittest.TestCase):
         client.disconnect(); client.loop_stop()
 
         # Wait for device_events table
-        deadline = time.time() + 8
+        deadline = time.monotonic() + 8
         found = False
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT count(*) FROM device_events WHERE event_id=%s", (event_id,))
@@ -207,15 +222,20 @@ class EndToEndSimulatorTests(unittest.TestCase):
         self.alarm_keys.append(occurrence[0])
 
         # Run outbox worker to deliver any pending outbox rows to mock nextGRP
-        processed = self.worker.run_once()
-        # Verify outbox state
-        with db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT delivery_state, ack_id FROM alarm_outbox WHERE alarm_key=%s",
-                            (occurrence[0],))
-                delivery_state, ack_id = cur.fetchone()
-                self.assertEqual(delivery_state, "DELIVERED")
-                self.assertTrue(bool(ack_id))
+        self.worker.run_once()
+        deadline = time.monotonic() + 5
+        delivery_state = ack_id = None
+        while time.monotonic() < deadline:
+            with db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT delivery_state, ack_id FROM alarm_outbox WHERE alarm_key=%s",
+                                (occurrence[0],))
+                    delivery_state, ack_id = cur.fetchone()
+            if delivery_state == "DELIVERED":
+                break
+            time.sleep(0.1)
+        self.assertEqual(delivery_state, "DELIVERED")
+        self.assertTrue(bool(ack_id))
 
 
     def test_e2e_lwt_offline_and_reconnect(self):
@@ -239,9 +259,9 @@ class EndToEndSimulatorTests(unittest.TestCase):
         publisher._sock_close()
 
         # Wait for Ingestion to record offline state
-        deadline = time.time() + 10
+        deadline = time.monotonic() + 10
         offline_detected = False
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT current_state FROM device_status WHERE device_id='TH-001'")
@@ -259,9 +279,9 @@ class EndToEndSimulatorTests(unittest.TestCase):
         restore.disconnect(); restore.loop_stop()
 
         # Wait for Ingestion to record online state
-        deadline = time.time() + 8
+        deadline = time.monotonic() + 8
         online_restored = False
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT current_state FROM device_status WHERE device_id='TH-001'")

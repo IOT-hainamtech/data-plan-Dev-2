@@ -2,7 +2,8 @@ import os
 import unittest
 import uuid
 
-from outbox_worker import NextGrpAdapter, validate_ack
+from integrations.nextgrp import NextGrpAdapter
+from outbox.worker import validate_ack
 
 
 @unittest.skipUnless(os.getenv("RUN_HTTP_TESTS") == "1", "set RUN_HTTP_TESTS=1")

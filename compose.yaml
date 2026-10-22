@@ -1,6 +1,10 @@
 # Separate Docker Compose project: does not overwrite the original MariaDB stack.
 name: nextwireless-dev2-pg
 
+x-app-build: &app-build
+  context: .
+  dockerfile: app/Dockerfile
+
 services:
   postgres:
     image: timescale/timescaledb:2.30.2-pg17
@@ -14,14 +18,7 @@ services:
 #   - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
-      - ./db/002_rules.sql:/docker-entrypoint-initdb.d/002_rules.sql:ro
-      - ./db/003_m1_rule_engine.sql:/docker-entrypoint-initdb.d/003_m1_rule_engine.sql:ro
-      - ./db/004_durable_outbox.sql:/docker-entrypoint-initdb.d/004_durable_outbox.sql:ro
-      - ./db/005_urd_alignment.sql:/docker-entrypoint-initdb.d/005_urd_alignment.sql:ro
-      - ./db/006_quality_contract.sql:/docker-entrypoint-initdb.d/006_quality_contract.sql:ro
-      - ./db/007_status_tracker_timeout.sql:/docker-entrypoint-initdb.d/007_status_tracker_timeout.sql:ro
-      - ./db/008_multi_site_registry.sql:/docker-entrypoint-initdb.d/008_multi_site_registry.sql:ro
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nw_user -d nextwireless"]
       interval: 5s
@@ -53,7 +50,7 @@ services:
       start_period: 5s
 
   data-plane:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     env_file:
       - ./.secrets/mqtt-data-plane.env
@@ -69,7 +66,7 @@ services:
       MQTT_TLS_MIN_VERSION: "1.2"
     volumes:
       - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
-      - ./db/008_multi_site_registry.sql:/migrations/008_multi_site_registry.sql:ro
+      - ./db/migrations:/migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,7 +75,7 @@ services:
     command: ["sh", "-c", "python migrate.py && exec python -u ingestor.py"]
 
   data-api:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     environment: *runtime_env
     ports:
@@ -90,7 +87,7 @@ services:
 
   # Development-only receiver. No traffic leaves the Compose network.
   mock-nextgrp:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     environment:
       MOCK_NEXTGRP_TOKEN: mock-development-token
@@ -102,7 +99,7 @@ services:
       retries: 10
 
   outbox-worker:
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     environment:
       <<: *runtime_env
@@ -128,7 +125,7 @@ services:
 
   simulator:
     profiles: ["demo"]
-    build: ./app
+    build: *app-build
     restart: unless-stopped
     env_file:
       - ./.secrets/mqtt-simulator.env
@@ -149,7 +146,7 @@ services:
 
   mqtt-security-test:
     profiles: ["mqtt-test"]
-    build: ./app
+    build: *app-build
     env_file:
       - ./.secrets/mqtt-data-plane.env
       - ./.secrets/mqtt-simulator.env
@@ -172,7 +169,7 @@ services:
         condition: service_healthy
       data-plane:
         condition: service_started
-    command: ["python", "-m", "unittest", "-v", "test_mqtt_security"]
+    command: ["python", "-m", "unittest", "-v", "tests.security.test_mqtt_security"]
 
 volumes:
   postgres_data:

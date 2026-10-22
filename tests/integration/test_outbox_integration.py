@@ -3,8 +3,9 @@ import unittest
 import uuid
 from datetime import datetime, timedelta
 
-from ingestor import db_connection
-from outbox_worker import DeliveryResult, OutboxStore, OutboxWorker
+from core.database import db_connection
+from integrations.nextgrp import DeliveryResult
+from outbox.worker import OutboxStore, OutboxWorker
 
 
 class Adapter:

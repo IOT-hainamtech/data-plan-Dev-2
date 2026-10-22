@@ -1,4 +1,4 @@
-"""Multi-device integration tests verifying TH-001 and TH-002 coexistence, rule isolation, and ACLs."""
+"""Multi-device integration tests verifying TH-001 and TH-002 coexistence and isolation."""
 import json
 import os
 import ssl
@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 import paho.mqtt.client as mqtt
 import psycopg
 
-from ingestor import db_connection, save_message
+from core.database import db_connection
+from ingestor import save_message
 
 
 def tls_context(cafile):

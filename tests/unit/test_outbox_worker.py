@@ -1,8 +1,8 @@
 import unittest
 from datetime import datetime
 
-from outbox_worker import (DeliveryResult, NextGrpAdapter, OutboxWorker,
-                           retry_delay, validate_ack)
+from integrations.nextgrp import DeliveryResult, NextGrpAdapter
+from outbox.worker import OutboxWorker, retry_delay, validate_ack
 
 
 class FakeStore:

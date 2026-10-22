@@ -1,11 +1,13 @@
-"""Unit tests for the firmware/Data Plane message contract."""
+"""Firmware contract plus optional PostgreSQL integration tests."""
 import os
 import unittest
 import uuid
 from unittest import mock
 
-from ingestor import (db_connection, door_heartbeat_event, save_message,
-                      validate_message, validate_telemetry_data)
+from core.database import db_connection
+from ingestion.contracts import (door_heartbeat_event, validate_message,
+                                 validate_telemetry_data)
+from ingestor import save_message
 
 
 class IngestorContractTests(unittest.TestCase):

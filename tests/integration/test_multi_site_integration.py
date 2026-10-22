@@ -7,7 +7,8 @@ from datetime import datetime
 from fastapi import HTTPException
 
 from api import latest, list_devices
-from ingestor import db_connection, save_message
+from core.database import db_connection
+from ingestor import save_message
 
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")

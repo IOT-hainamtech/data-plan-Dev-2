@@ -1,162 +1,178 @@
-# nextWireless M1 — L2A Data Plane
+# nextWireless M1 Data Plane
 
-**Nền tảng thu thập, xử lý và cung cấp dữ liệu IoT cho nextWireless Smart Office M1.**
+An MQTT-based IoT data plane for nextWireless Smart Office M1. It receives device telemetry,
+events and presence, stores time-series data in PostgreSQL/TimescaleDB, evaluates durable rules,
+delivers alarms through an outbox, and exposes a read-only API.
 
-Dự án xây dựng Data Plane độc lập để tiếp nhận dữ liệu từ thiết bị, lưu trữ telemetry, theo dõi trạng thái, xử lý quy tắc cảnh báo và cung cấp API tích hợp với **nextGRP/Frappe**. Hiện tại dự án là **bản thử nghiệm kỹ thuật (PoC)**, chưa phải hệ thống production.
+This repository is a tested development PoC. It is not a production nextGRP integration and has
+not been validated on physical ESP32/SHT31/MC-38 hardware.
 
-## Kiến trúc
+## Key Features
+
+- MQTT 3.1.1 over TLS 1.2+, QoS 1, per-device credentials and topic ACLs.
+- Temperature/humidity telemetry and door event/status contracts.
+- Organization, Site, Zone, Device and Device Profile registry.
+- Device, Profile, Zone, Site and Organization rule scopes with per-device runtime state.
+- TimescaleDB telemetry storage and idempotent report/event ingestion.
+- Durable alarm outbox with leases, retry/backoff, ACK validation and replay safety.
+- Read-only FastAPI endpoints with a development-only organization context.
+- ESP-IDF/PlatformIO firmware for SHT31 and MC-38 devices.
+- Unit, PostgreSQL, MQTT security, end-to-end and firmware contract tests.
+
+## System Architecture
 
 ```mermaid
-flowchart TD
-    A[ESP32 / Simulator S1, S6] -->|MQTT TLS 1.2+ / QoS 1| B[Mosquitto Broker]
-    B --> C[Python Ingestion]
-    C --> D[(PostgreSQL + TimescaleDB)]
-    C --> E[Rule Engine / Status Tracker]
-    E --> D
-    E --> F[Durable Outbox]
-    F --> G[Outbox Worker]
-    G --> H[Mock nextGRP API]
-    D --> I[FastAPI Data API]
-    I -. REST API trong tương lai .-> J[nextGRP / Frappe]
-    G -. Tích hợp khi chốt API .-> J
+flowchart LR
+    Device[ESP32 / Simulator] -->|MQTT TLS, QoS 1| Broker[Mosquitto]
+    Broker --> Ingestion[Ingestion Service]
+    Ingestion --> Registry[Registry / Profiles]
+    Ingestion --> Rules[Rule & Status Services]
+    Registry --> DB[(PostgreSQL + TimescaleDB)]
+    Rules --> DB
+    Rules --> Outbox[Durable Outbox]
+    Outbox --> Worker[Outbox Worker]
+    Worker --> Mock[Mock nextGRP]
+    Worker -. future signed contract .-> NextGRP[nextGRP]
+    DB --> API[FastAPI Data API]
 ```
 
-Hướng thiết kế dài hạn: dữ liệu từ các thiết bị và đường truyền khác nhau có thể được chuẩn hóa thông qua **Gateway / Protocol Adapter** và **Device Profile**, để tái sử dụng Data Plane trong nhiều lĩnh vực. Đây là định hướng phát triển, chưa phải chức năng đã triển khai đầy đủ.
+The Python backend is a modular application deployed as separate Compose processes. Runtime
+processes share one PostgreSQL schema; this is intentionally not presented as independent
+microservices.
 
-## Công nghệ
+## Tech Stack
 
-| Thành phần | Công nghệ | Vai trò |
-| --- | --- | --- |
-| Giao tiếp IoT | MQTT, Paho MQTT | Nhận dữ liệu telemetry/event/status |
-| MQTT Broker | Eclipse Mosquitto 2 | Phân phối bản tin từ thiết bị |
-| Xử lý dữ liệu | Python 3.12 | Ingestion, Rule Engine, Status Tracker, Worker |
-| API | FastAPI | Truy vấn dữ liệu và giám sát dịch vụ |
-| Cơ sở dữ liệu | PostgreSQL 17 + TimescaleDB 2.30.2 | Lưu telemetry, sự kiện và trạng thái nghiệp vụ |
-| Gửi cảnh báo | Durable Outbox | Lưu bền, retry, idempotency và xác nhận ACK |
-| Triển khai | Docker Compose | Chạy các dịch vụ độc lập trong môi trường phát triển |
+| Area | Technology |
+| --- | --- |
+| Device transport | MQTT, Paho MQTT, Mosquitto 2 |
+| Backend/API | Python 3.12, FastAPI, Uvicorn |
+| Database | PostgreSQL 17, TimescaleDB 2.30.2, psycopg 3 |
+| Firmware | ESP32, ESP-IDF, PlatformIO, C++17 |
+| Local deployment | Docker Compose, PowerShell helper scripts |
 
-## Chức năng hiện có
+## Project Structure
 
-- **S1 — Nhiệt độ/độ ẩm:** tiếp nhận `quality` ở top-level (`good` mặc định hoặc `error`); bản tin lỗi không chứa số đo giả. Cảnh báo khi nhiệt độ vượt 30 °C liên tục 300 giây, hysteresis 1 °C, phục hồi liên tục 120 giây và quiet window 600 giây.
-- **S6 — Giám sát cửa:** giờ làm việc là thứ Hai–thứ Sáu, 08:00–18:00 theo `Asia/Ho_Chi_Minh`; ngoài lịch cảnh báo ngay, trong lịch cảnh báo khi cửa mở liên tục 300 giây. Timer xử lý khi không có MQTT mới và heartbeat `door_state` đối soát event bị mất.
-- **Thiết bị:** theo dõi birth online, LWT/offline, `last_seen_at`, timeout theo cấu hình thiết bị, chống transition trùng và tự trở lại online khi reconnect. Trạng thái và lịch sử được lưu bền trong PostgreSQL.
-- **Lưu trữ:** bảng `telemetry` đã được cấu hình là **TimescaleDB hypertable**.
-- **Outbox Worker:** claim bằng `FOR UPDATE SKIP LOCKED`, lease bền vững, retry có backoff/jitter, kiểm tra ACK và chống gửi trùng theo `alarm_key`.
-- **Kiểm thử:** migration 001–007, ingestion, Rule Engine, Status Tracker, Outbox Worker, MQTT security và luồng End-to-End đã được thử nghiệm với PostgreSQL/TimescaleDB và API nextGRP giả lập (mock).
-- **MQTT security:** TLS 1.2+, kiểm tra certificate, tài khoản riêng, ACL theo
-  thiết bị, QoS 1, retained status, LWT và tự động reconnect.
-- **Multi-organization registry:** Organization/Site/Zone, Device Profile và cấu hình thiết bị
-  được quản lý bằng migration 008; ingestion xác thực route theo registry và rule hỗ trợ scope
-  Device/Profile/Zone/Site/Organization với runtime độc lập cho từng thiết bị.
+```text
+app/
+  api/             FastAPI application and tenant dependency
+  core/            shared database and clock utilities
+  ingestion/       topic and payload contracts
+  integrations/    external adapters, including provisional nextGRP
+  outbox/           durable delivery worker and store
+  registry/         organization/site/device/profile queries
+  rules/            rule evaluation and durable state machines
+  status/           device presence and timeout handling
+  *.py              stable process entrypoints and compatibility modules
+db/migrations/      canonical SQL migrations 001–008
+tests/
+  unit/             tests without external services
+  integration/      PostgreSQL and mock-service tests
+  security/         MQTT TLS/auth/ACL/QoS/LWT tests
+  e2e/              full simulator-style data-flow tests
+firmware/            ESP-IDF/PlatformIO source and firmware tests
+mosquitto/           development broker configuration and ACL
+scripts/             provisioning, migration and LAN helper scripts
+docs/                design, operations and audit documentation
+compose.yaml         local development stack
+```
 
-> **Lưu ý:** Trạng thái `DELIVERED` trong môi trường demo chỉ xác nhận API **mock** đã nhận cảnh báo; **không có nghĩa cảnh báo đã được gửi tới nextGRP thật**.
+## Prerequisites
 
-## Chạy dự án trên máy local
+- Docker Desktop with Docker Compose.
+- PowerShell on Windows for the documented helper workflow.
+- PlatformIO Core and the repository firmware virtual environment for firmware builds.
 
-### Yêu cầu
+## Quick Start
 
-- Docker Desktop với Docker Compose.
-- PowerShell (Windows) hoặc terminal tương đương.
-
-### Khởi động
+From the repository root:
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
-```
-
-Đặt giá trị riêng cho `PG_PASSWORD` trong `.env`, sau đó chạy:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File scripts/generate-dev-mqtt-assets.ps1
 docker compose --profile demo up -d --build
 docker compose ps
 ```
 
-Các cổng dùng cho demo:
+Set a strong local `PG_PASSWORD` in `.env`. The asset script creates ignored development MQTT
+credentials and certificates. By default MQTT and the API bind only to loopback.
 
-| Dịch vụ | Địa chỉ |
-| --- | --- |
-| FastAPI | `http://127.0.0.1:8002` |
-| MQTT TLS | `mqtts://127.0.0.1:8883` |
-| PostgreSQL | Chỉ truy cập trong mạng nội bộ Docker |
-
-### Kiểm tra hệ thống
+Verify the running services:
 
 ```powershell
-# Trạng thái API
 curl.exe http://127.0.0.1:8002/api/v1/health
-
-# Thống kê dữ liệu, trạng thái và cảnh báo
-docker compose exec -T data-plane python check.py
-
-# Kết quả từ TimescaleDB
-docker compose exec -T postgres psql -U nw_user -d nextwireless -c "SELECT hypertable_name FROM timescaledb_information.hypertables;"
-
-# Thống kê Outbox
 curl.exe http://127.0.0.1:8002/api/v1/outbox/metrics
-
-# Kiểm thử tự động
-docker compose exec -T -e RUN_DB_TESTS=1 data-plane python -m unittest discover -v
+curl.exe -H "X-Org-Code: demo" http://127.0.0.1:8002/api/v1/devices
+docker compose exec -T data-plane python check.py
 ```
 
-Các endpoint dữ liệu hiện có:
-
-```text
-GET /api/v1/health
-GET /api/v1/outbox/metrics
-GET /api/v1/devices                       # header: X-Org-Code: demo
-GET /api/v1/devices/{device_id}/latest
-GET /api/v1/devices/{device_id}/telemetry?limit=5
-GET /api/v1/devices/{device_id}/status
-GET /api/v1/devices/{device_id}/events
-GET /api/v1/alarms                        # header: X-Org-Code: demo
-```
-
-Các endpoint dữ liệu thiết bị/alarm yêu cầu header `X-Org-Code`. Đây chỉ là tenant context giả lập
-cho local PoC, không phải authentication/RBAC production. Xem thiết kế và ranh giới Dev1 tại
-[`docs/MULTI_ORG_SITE_DESIGN.md`](docs/MULTI_ORG_SITE_DESIGN.md) và
-[`docs/DEV1_DATA_PLANE_INTEGRATION.md`](docs/DEV1_DATA_PLANE_INTEGRATION.md).
-
-Kiểm thử MQTT security cần tạm dừng simulator để tránh cạnh tranh retained status:
+Stop the demo without deleting data:
 
 ```powershell
-docker compose stop simulator
-docker compose --profile mqtt-test run --rm mqtt-security-test
-docker compose start simulator
+docker compose --profile demo stop
 ```
 
-Chạy đầy đủ các nhóm integration bằng container test, chỉ kết nối tới PostgreSQL,
-MQTT và Mock nextGRP trong Compose:
+Do not run `docker compose down -v` when the PostgreSQL or MQTT volumes must be preserved.
+
+## Environment Configuration
+
+| Setting | Required | Purpose |
+| --- | --- | --- |
+| `PG_PASSWORD` | Yes, in ignored `.env` | PostgreSQL application password |
+| `MQTT_BIND_IP` | No; defaults to `127.0.0.1` | Explicit broker bind address |
+| `MQTT_*` credentials | Generated | Stored in ignored `.secrets/*.env` |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` | Compose provides | Database connection settings |
+| `RULE_TIMER_INTERVAL` | No; default 5 seconds | Due-rule/status timer cadence |
+| `OUTBOX_*` | Compose provides demo defaults | Delivery batch, lease and retry policy |
+| `NEXTGRP_*` | Mock only in Compose | Provisional receiver URL/auth settings |
+
+Never commit `.env`, `.secrets/`, private keys, generated NVS images or device passwords. LAN
+exposure is opt-in and must follow [MQTT_LAN.md](docs/MQTT_LAN.md); no LAN IP is a repository-wide
+default.
+
+## Testing
+
+Run Python syntax and tests in the application image:
 
 ```powershell
-# Database, Rule Engine, Status Tracker, Outbox và multi-device storage
+python -m compileall -q app tests
+docker compose exec -T data-plane python -m unittest discover -s tests -v
 docker compose exec -T -e RUN_DB_TESTS=1 data-plane `
-  python -m unittest -v test_ingestor_contract test_rule_engine_integration `
-  test_status_tracker test_outbox_integration `
-  test_multi_device_integration.MultiDeviceDatabaseTests
-
-# MQTT → Ingestion → PostgreSQL
-docker compose stop simulator
-docker compose --profile mqtt-test run --rm `
-  -e RUN_MQTT_INGESTION_TESTS=1 mqtt-security-test
-
-# End-to-End S1/S6/LWT → Alarm → Outbox → Mock nextGRP ACK
-docker compose --profile mqtt-test run --rm `
-  -e RUN_E2E_TESTS=1 `
-  -e MOCK_TEST_URL=http://mock-nextgrp:8080/mock/v1/alarms `
-  -e MOCK_TEST_TOKEN=mock-development-token `
-  mqtt-security-test python -m unittest -v test_e2e_simulator
-docker compose start simulator
+  python -m unittest discover -s tests/integration -v
 ```
 
-Kiểm tra migration 001–008 trên PostgreSQL test tách biệt:
+Validate migrations 001–008 twice on an isolated database:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/test-migrations-fresh.ps1
 ```
 
-Build và kiểm tra contract firmware:
+MQTT security and ingestion tests require the simulator to be stopped to avoid retained-message
+competition:
+
+```powershell
+docker compose stop simulator
+docker compose --profile mqtt-test run --rm mqtt-security-test
+docker compose --profile mqtt-test run --rm `
+  -e RUN_MQTT_INGESTION_TESTS=1 mqtt-security-test
+docker compose start simulator
+```
+
+Run the end-to-end suite against the Compose mock:
+
+```powershell
+docker compose --profile mqtt-test run --rm `
+  -e RUN_E2E_TESTS=1 `
+  -e MOCK_TEST_URL=http://mock-nextgrp:8080/mock/v1/alarms `
+  -e MOCK_TEST_TOKEN=mock-development-token `
+  mqtt-security-test python -m unittest -v tests.e2e.test_e2e_simulator
+```
+
+`mock-development-token` is a public local-test value, not a production credential.
+
+## ESP32 Firmware
+
+Build both device variants and run firmware contract tests:
 
 ```powershell
 firmware\.venv\Scripts\python.exe -m platformio run -d firmware -e sht31
@@ -164,90 +180,63 @@ firmware\.venv\Scripts\python.exe -m platformio run -d firmware -e reed_door
 firmware\.venv\Scripts\python.exe -m unittest discover -s firmware\tests -v
 ```
 
-Quản lý credential/ACL mà không dừng toàn bộ stack:
+Provisioning requires a confirmed broker hostname/IP that appears in the certificate SAN. See:
 
-```powershell
-# Cấp tài khoản và ACL cho topic riêng
-.\scripts\manage-mqtt-account.ps1 grant -Username SENSOR-002 -DeviceId SENSOR-002
+- [Firmware overview](firmware/README.md)
+- [ESP32 provisioning](docs/ESP32_PROVISIONING.md)
+- [Hardware setup](docs/ESP32_HARDWARE_SETUP.md)
+- [Functional checklist](docs/ESP32_TEST_CHECKLIST.md)
 
-# Đổi mật khẩu hoặc thu hồi quyền đăng nhập
-.\scripts\manage-mqtt-account.ps1 password -Username SENSOR-002
-.\scripts\manage-mqtt-account.ps1 revoke -Username SENSOR-002
-```
+Physical-device validation remains pending.
 
-Sau khi đổi mật khẩu, cập nhật secret trên chính thiết bị và reconnect thiết bị đó.
-Thu hồi bằng password file chặn lần xác thực tiếp theo; để ngắt ngay một session
-vật lý đang kết nối cần thêm cơ chế quản trị session/Dynamic Security.
+## API & Documentation
 
-Dừng các dịch vụ demo mà vẫn giữ dữ liệu:
-
-```powershell
-docker compose --profile demo stop
-```
-
-**Không chạy `docker compose down -v` nếu muốn giữ dữ liệu**, vì `-v` xóa các volume PostgreSQL và MQTT.
-
-## Cấu trúc thư mục
+Operator endpoints:
 
 ```text
-app/                 Python services, Rule Engine, API, Worker và tests
-db/                  Schema và các SQL migration
-firmware/            ESP32 ESP-IDF/PlatformIO dùng chung cho SHT31 và MC-38
-mosquitto/           Cấu hình MQTT Broker
-scripts/              Sinh TLS/credential và quản lý tài khoản MQTT
-docs/                Ghi chú kỹ thuật
-compose.yaml         Cấu hình Docker Compose
-.env.example         Mẫu biến môi trường (không chứa mật khẩu thật)
+GET /api/v1/health
+GET /api/v1/outbox/metrics
 ```
 
-## Giới hạn hiện tại và kế hoạch phát triển
+Data endpoints require `X-Org-Code`:
 
-- [x] MQTT TLS 1.2+, tài khoản riêng và ACL thiết bị cho development.
-- [x] Migration 001–008, registry nhiều Organization/Site/Zone, profile-driven ingestion,
-  scoped rules, Device Status Tracker timeout, LWT/reconnect và durable outbox recovery.
-- [x] End-to-End bằng Simulator cho S1, S6, Alarm, Outbox và Mock nextGRP ACK.
-- [ ] Flash và kiểm thử firmware ESP32/SHT31, MC-38 trên phần cứng thực tế.
-- [ ] Tích hợp API và đồng bộ Device/Profile/Rule/Status/Alarm thật với nextGRP (IF-01 đến IF-07).
-- [ ] Nghiệm thu phần cứng FT-01 đến FT-12 và kiểm thử soak/recovery trên thiết bị thật.
-- [x] Mô hình Data Plane nhiều Organization/Site/Zone với tenant-filtered local API; authentication,
-  RBAC và đồng bộ control-plane thật vẫn chờ contract Dev1/nextGRP.
-- [ ] Bổ sung chính sách retention, metrics/alert vận hành, backup/restore và benchmark mở rộng.
-- [ ] Nghiên cứu Gateway/Protocol Adapter cho thiết bị công nghiệp và kết nối 4G/5G.
+```text
+GET /api/v1/devices
+GET /api/v1/devices/{device_id}/latest
+GET /api/v1/devices/{device_id}/telemetry
+GET /api/v1/devices/{device_id}/status
+GET /api/v1/devices/{device_id}/events
+GET /api/v1/alarms
+```
 
-## Kết quả kiểm thử đã xác minh
+`X-Org-Code` is a forgeable development context, not production authentication or RBAC.
 
-Kết quả gần nhất ngày **2026-10-21** được ghi chi tiết tại
-[`docs/DATA_PLANE_STABILIZATION_REPORT.md`](docs/DATA_PLANE_STABILIZATION_REPORT.md):
+Related documentation:
 
-- 7/7 service Compose chạy; PostgreSQL, MQTT và Mock nextGRP healthy.
-- 54/54 test ứng dụng và 9/9 firmware contract test PASS.
-- Tổng cộng **63 PASS, 0 FAIL, 0 SKIPPED, 0 BLOCKED** khi chạy từng nhóm với cờ integration phù hợp.
-- Fresh migration và idempotency 001–007 PASS trên TimescaleDB test tách biệt.
-- FastAPI health `UP`; Outbox tại thời điểm xác minh có `pending=0`, `failed=0`.
-- Firmware SHT31 và MC-38 đều build PASS.
+- [Multi-organization design](docs/MULTI_ORG_SITE_DESIGN.md)
+- [Dev1/nextGRP boundary](docs/DEV1_DATA_PLANE_INTEGRATION.md)
+- [Technical notes](docs/TECH_NOTES.md)
+- [Project structure audit](docs/PROJECT_STRUCTURE_AUDIT.md)
+- [Data Plane stabilization evidence](docs/DATA_PLANE_STABILIZATION_REPORT.md)
 
-Đây là trạng thái PoC/Simulator, không phải nghiệm thu phần cứng hoặc nextGRP production.
+## Current Status
 
-### Bảo mật
+- Software behavior is implemented for the M1 simulator and local Compose environment.
+- SQL migrations 001–008 are canonical under `db/migrations/`.
+- Multi-organization registry and scoped rule runtime are implemented.
+- nextGRP delivery remains a provisional mock contract.
+- ESP32 source builds exist, but physical hardware acceptance is pending.
+- Production identity/RBAC, control-plane synchronization, retention, backup and scale benchmarks
+  are not complete.
 
-**Chỉ sử dụng Development CA cho local.** Broker chỉ bind `127.0.0.1`, không
-mở ra Internet. `.env`, `.secrets/` và `mosquitto/certs/` đều bị Git ignore.
-Dùng `scripts/manage-mqtt-account.ps1` để cấp/đổi/thu hồi tài khoản và reload
-Mosquitto mà không dừng toàn bộ stack. Không bật gửi Alarm tới nextGRP thật.
+See [SOURCE_REFACTOR_REPORT.md](docs/SOURCE_REFACTOR_REPORT.md) for the validation status of this
+refactor.
 
-Để chuẩn bị kết nối ESP32 trên Wi-Fi mà vẫn giới hạn firewall theo subnet, xem
-[`docs/MQTT_LAN.md`](docs/MQTT_LAN.md). Compose tiếp tục bind loopback theo mặc
-định; chỉ đặt `MQTT_BIND_IP` sau khi đã xác nhận IP/subnet và firewall rule.
+## Roadmap
 
-Tại lần xác minh 2026-10-21, IPv4 Wi-Fi của máy phát triển là `192.168.1.110`
-nhưng development certificate cũ chứa SAN `192.168.1.87`; vì vậy không dùng
-certificate cũ để kết nối ESP32 qua IP mới. Cần chốt IP LAN rồi cấp lại
-certificate theo tài liệu, không tắt hostname verification hoặc mở firewall tùy ý.
-
-Xem thêm ghi chú tại [`docs/TECH_NOTES.md`](docs/TECH_NOTES.md).
-
-Tài liệu chuẩn bị thiết bị:
-
-- [`docs/ESP32_PROVISIONING.md`](docs/ESP32_PROVISIONING.md)
-- [`docs/ESP32_HARDWARE_SETUP.md`](docs/ESP32_HARDWARE_SETUP.md)
-- [`docs/ESP32_TEST_CHECKLIST.md`](docs/ESP32_TEST_CHECKLIST.md)
+1. Agree the authoritative nextGRP identity, registry, rule and alarm contracts.
+2. Replace the development tenant header and mock alarm adapter with verified integration.
+3. Automate device credential/ACL lifecycle from the control plane.
+4. Complete physical ESP32/SHT31/MC-38 testing and recovery/soak evidence.
+5. Define retention, backup/restore, observability and capacity targets.
+6. Evaluate signed OTA, Secure Boot, flash encryption and production credential rotation.

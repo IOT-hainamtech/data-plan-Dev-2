@@ -21,7 +21,8 @@ try {
     docker compose -p $ProjectName run --rm --no-deps `
       -e DB_HOST=postgres -e DB_PORT=5432 -e DB_NAME=nextwireless -e DB_USER=nw_user `
       -e DB_PASSWORD=migration-test-only-password -e RUN_DB_TESTS=1 `
-      data-plane python -m unittest -v test_ingestor_contract test_rule_engine_integration
+      data-plane python -m unittest -v tests.integration.test_ingestor_contract `
+      tests.integration.test_rule_engine_integration tests.integration.test_multi_site_integration
     if ($LASTEXITCODE -ne 0) { throw 'Fresh-schema ingestion/rule tests failed' }
 
     docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `

@@ -1,9 +1,9 @@
-"""Run: python -m unittest -v test_rule_engine test_rule_engine_integration"""
+"""Pure Rule Engine state-machine tests."""
 import unittest
 from datetime import datetime, time, timedelta
 
-from rule_engine import (_alarm_key, door_should_fire, is_business_hours,
-                         threshold_transition)
+from rules.engine import (_alarm_key, door_should_fire, is_business_hours,
+                          threshold_transition)
 
 
 class ThresholdTests(unittest.TestCase):

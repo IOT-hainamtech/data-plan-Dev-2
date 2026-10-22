@@ -4,7 +4,9 @@ import unittest
 import uuid
 from datetime import datetime, timedelta
 
-from ingestor import db_connection, reconcile_device_timeouts, save_message, update_device_presence
+from core.database import db_connection
+from ingestor import save_message
+from status.service import reconcile_device_timeouts, update_device_presence
 
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")

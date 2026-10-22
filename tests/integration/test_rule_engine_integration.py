@@ -3,8 +3,8 @@ import os
 import unittest
 from datetime import datetime, timedelta
 
-from ingestor import db_connection
-from rule_engine import evaluate_due_rules, on_event, on_telemetry
+from core.database import db_connection
+from rules.engine import evaluate_due_rules, on_event, on_telemetry
 
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")

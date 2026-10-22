@@ -5,185 +5,22 @@ import os
 import ssl
 import threading
 import time
-from datetime import datetime, timezone
 
 import psycopg
 from psycopg.types.json import Jsonb
 import paho.mqtt.client as mqtt
 
-from rule_engine import evaluate_due_rules, on_event, on_telemetry
+from core.clock import now_utc
+from core.database import db_connection
+from ingestion.contracts import (door_heartbeat_event, parse_timestamp,
+                                 require_int, validate_message,
+                                 validate_telemetry_data)
+from registry import load_device_profile, load_profile_contract, load_profile_event_types
+from rules.engine import evaluate_due_rules, on_event, on_telemetry
+from status import reconcile_device_timeouts, update_device_presence
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger("data-plane")
-
-
-def now_utc():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def parse_timestamp(value):
-    if value is None:
-        return now_utc(), "server"
-    if not isinstance(value, str):
-        raise ValueError("ts must be an ISO-8601 UTC string")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("invalid ts") from exc
-    if parsed.tzinfo is None:
-        raise ValueError("ts must include timezone")
-    return parsed.astimezone(timezone.utc).replace(tzinfo=None), "device"
-
-
-def db_connection():
-    return psycopg.connect(
-        host=os.environ.get("DB_HOST", "postgres"),
-        port=int(os.environ.get("DB_PORT", "5432")),
-        dbname=os.environ.get("DB_NAME", "nextwireless"),
-        user=os.environ.get("DB_USER", "nw_user"),
-        password=os.environ["DB_PASSWORD"],
-        connect_timeout=5,
-        autocommit=False,
-    )
-
-
-def require_int(value, name):
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{name} must be a non-negative integer")
-
-
-def validate_telemetry_data(payload, point_definitions=None):
-    data = payload["data"]
-    definitions = point_definitions or {
-        "temperature": {"data_type": "number", "min_value": -20, "max_value": 80},
-        "humidity": {"data_type": "number", "min_value": 0, "max_value": 100},
-    }
-    allowed = set(definitions)
-    quality = payload.get("quality", "good")
-    if quality not in ("good", "error"):
-        raise ValueError("quality must be good or error")
-    if not set(data).issubset(allowed):
-        raise ValueError("unsupported telemetry metric")
-    metrics = data
-    if quality == "error":
-        if metrics:
-            raise ValueError("error telemetry must not contain measurements")
-        return quality, metrics
-    if not metrics:
-        raise ValueError("good telemetry requires measurements")
-    for metric, value in metrics.items():
-        definition = definitions[metric]
-        if definition["data_type"] == "number":
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"{metric} must be numeric")
-            if not (float('-inf') < value < float('inf')):
-                raise ValueError("non-finite metric")
-            minimum, maximum = definition.get("min_value"), definition.get("max_value")
-            if minimum is not None and value < minimum or maximum is not None and value > maximum:
-                raise ValueError(f"{metric} out of range")
-    return quality, metrics
-
-
-def load_profile_contract(cur, profile, channel):
-    cur.execute("""SELECT point_code,data_type,min_value,max_value,allowed_values,required
-        FROM device_profile_points WHERE profile_code=%s AND channel=%s""", (profile, channel))
-    definitions = {}
-    for code, data_type, minimum, maximum, allowed, required in cur.fetchall():
-        definitions[code] = {"data_type": data_type, "min_value": minimum,
-                             "max_value": maximum, "allowed_values": allowed,
-                             "required": required}
-    return definitions
-
-
-def door_heartbeat_event(profile, body, event_types=None):
-    door_state = body["data"].get("door_state")
-    if door_state is None:
-        return None
-    mapping = event_types or ({"open": "DOOR_OPENED", "closed": "DOOR_CLOSED"}
-                              if profile == "DOOR_SENSOR" else {})
-    if door_state not in mapping:
-        raise ValueError("invalid door heartbeat")
-    return (f"heartbeat:{body['boot_id']}:{body['seq']}",
-            mapping[door_state])
-
-
-def validate_message(topic, payload):
-    parts = topic.split("/")
-    if len(parts) != 6 or parts[:2] != ["nw", "v1"]:
-        raise ValueError("invalid topic")
-    _, _, org, site, device, channel = parts
-    if channel not in ("telemetry", "event", "status"):
-        raise ValueError("unsupported channel")
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be JSON object")
-    if payload.get("schema_version") != 1:
-        raise ValueError("unsupported schema_version")
-    if payload.get("device_id") != device:
-        raise ValueError("topic/device_id mismatch")
-    if not isinstance(payload.get("boot_id"), str) or not payload["boot_id"]:
-        raise ValueError("boot_id required")
-    require_int(payload.get("seq"), "seq")
-    if not isinstance(payload.get("data"), dict):
-        raise ValueError("data must be JSON object")
-    stamp, source = parse_timestamp(payload.get("ts"))
-    if channel == "event":
-        if not isinstance(payload.get("event_id"), str) or not payload["event_id"]:
-            raise ValueError("event_id required")
-        if not isinstance(payload.get("event_type"), str) or not payload["event_type"]:
-            raise ValueError("event_type required")
-    if channel == "status" and payload.get("state") not in ("online", "offline"):
-        raise ValueError("status state must be online/offline")
-    return org, site, device, channel, stamp, source
-
-
-def update_device_presence(cur, *, device_id, boot_id, received_at, explicit_state=None):
-    """Update device presence, last_seen_at timestamp, and record transitions without duplicates."""
-    cur.execute("SELECT current_state FROM device_status WHERE device_id=%s FOR UPDATE", (device_id,))
-    row = cur.fetchone()
-    target_state = explicit_state or "online"
-    prev_state = row[0] if row else None
-    inserted = 0
-
-    if prev_state != target_state:
-        cur.execute("""INSERT INTO device_status_history
-            (device_id, state, received_at, boot_id) VALUES (%s, %s, %s, %s)""",
-            (device_id, target_state, received_at, boot_id))
-        inserted = 1
-
-    cur.execute("""INSERT INTO device_status
-        (device_id, current_state, received_at, boot_id, last_seen_at)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (device_id) DO UPDATE SET
-            current_state = EXCLUDED.current_state,
-            received_at = EXCLUDED.received_at,
-            boot_id = EXCLUDED.boot_id,
-            last_seen_at = COALESCE(EXCLUDED.last_seen_at, device_status.last_seen_at)""",
-        (device_id, target_state, received_at, boot_id, received_at if target_state == "online" else None))
-    return inserted
-
-
-def reconcile_device_timeouts(cur, now, device_id=None):
-    """Mark online devices as offline if no message has been received within timeout_seconds."""
-    cur.execute("""SELECT device_id, boot_id, last_seen_at, timeout_seconds
-        FROM device_status
-        WHERE current_state = 'online'
-          AND last_seen_at IS NOT NULL
-          AND last_seen_at <= %s - (timeout_seconds || ' seconds')::interval
-          AND (%s::text IS NULL OR device_id = %s)
-        FOR UPDATE""", (now, device_id, device_id))
-    timed_out = cur.fetchall()
-    for dev_id, boot_id, last_seen, timeout_sec in timed_out:
-        cur.execute("""INSERT INTO device_status_history
-            (device_id, state, received_at, boot_id)
-            VALUES (%s, 'offline', %s, %s)""",
-            (dev_id, now, boot_id))
-        cur.execute("""UPDATE device_status
-            SET current_state = 'offline', received_at = %s
-            WHERE device_id = %s""",
-            (now, dev_id))
-        LOG.warning("DEVICE_OFFLINE_TIMEOUT device=%s last_seen=%s age=%.1fs timeout=%ds",
-                    dev_id, last_seen, (now - last_seen).total_seconds(), timeout_sec)
-    return len(timed_out)
 
 
 def save_message(topic, body):
@@ -192,11 +29,9 @@ def save_message(topic, body):
     conn = db_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT profile_code FROM devices WHERE device_id=%s AND org_code=%s AND site_code=%s AND enabled=TRUE", (device, org, site))
-        record = cur.fetchone()
-        if record is None:
+        profile = load_device_profile(cur, device, org, site)
+        if profile is None:
             raise ValueError("unknown, disabled, or wrongly routed device")
-        profile = record[0]
         inserted = 0
         if channel == "telemetry":
             point_definitions = load_profile_contract(cur, profile, "telemetry")
@@ -249,9 +84,7 @@ def save_message(topic, body):
             inserted = update_device_presence(cur, device_id=device, boot_id=body["boot_id"],
                                               received_at=received, explicit_state=state)
             points = load_profile_contract(cur, profile, "status")
-            cur.execute("""SELECT state_value,event_type FROM device_profile_events
-                WHERE profile_code=%s AND state_point='door_state'""", (profile,))
-            event_types = dict(cur.fetchall())
+            event_types = load_profile_event_types(cur, profile, "door_state")
             heartbeat = door_heartbeat_event(profile, body, event_types) if "door_state" in points else None
             if heartbeat:
                 heartbeat_id, heartbeat_type = heartbeat
