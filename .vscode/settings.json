@@ -1,0 +1,8 @@
+{
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/firmware/.pio/build/sht31/compile_commands.json",
+  "C_Cpp.default.configurationProvider": "platformio.platformio-ide",
+  "C_Cpp.errorSquiggles": "enabled",
+  "files.associations": {
+    "*.hpp": "cpp"
+  }
+}

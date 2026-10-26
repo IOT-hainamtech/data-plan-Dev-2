@@ -81,7 +81,7 @@ class MultiSiteIntegrationTests(unittest.TestCase):
                 cur.execute("SELECT device_id FROM alarm_occurrences WHERE rule_code=%s", (self.rule,))
                 self.assertEqual([row[0] for row in cur.fetchall()], [self.dev_a])
 
-        visible = list_devices(self.org_a)["devices"]
+        visible = list_devices(self.org_a, limit=100, offset=0)["devices"]
         self.assertIn(self.dev_a, {d["device_id"] for d in visible})
         self.assertNotIn(self.dev_b, {d["device_id"] for d in visible})
         with self.assertRaises(HTTPException) as denied:

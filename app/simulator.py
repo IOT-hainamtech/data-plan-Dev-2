@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 
-ORG = "demo"  # DEMO ONLY: must match nextGRP registry at integration time.
-SITE = "demo-site"
+ORG = os.getenv("SIM_ORG_CODE", "demo")
+SITE = os.getenv("SIM_SITE_CODE", "demo-site")
+S1_DEVICE_ID = os.getenv("SIM_S1_DEVICE_ID", "TH-001")
+S6_DEVICE_ID = os.getenv("SIM_S6_DEVICE_ID", "DR-001")
 HOST = os.getenv("MQTT_HOST", "mqtt")
 PORT = int(os.getenv("MQTT_PORT", "8883"))
 CA_FILE = os.getenv("MQTT_CA_FILE", "/run/mqtt/ca.crt")
@@ -31,8 +33,12 @@ class SimulatedDevice:
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                                   client_id=f"sim-{device_id}-{self.boot_id}")
         prefix = device_id.replace("-", "")
-        self.client.username_pw_set(os.environ[f"{prefix}_MQTT_USERNAME"],
-                                    os.environ[f"{prefix}_MQTT_PASSWORD"])
+        role = "S1" if device_id == S1_DEVICE_ID else "S6"
+        username = os.getenv(f"SIM_{role}_MQTT_USERNAME", os.getenv(f"{prefix}_MQTT_USERNAME"))
+        password = os.getenv(f"SIM_{role}_MQTT_PASSWORD", os.getenv(f"{prefix}_MQTT_PASSWORD"))
+        if not username or not password:
+            raise RuntimeError(f"MQTT credentials are not configured for simulator role {role}")
+        self.client.username_pw_set(username, password)
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=CA_FILE)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = True
@@ -92,8 +98,8 @@ class SimulatedDevice:
 def main():
     # Allow Data Plane to connect/subscribe before sending the first non-retained event.
     time.sleep(3)
-    s1 = SimulatedDevice("TH-001")
-    s6 = SimulatedDevice("DR-001")
+    s1 = SimulatedDevice(S1_DEVICE_ID)
+    s6 = SimulatedDevice(S6_DEVICE_ID)
     tick = 0
     door_open = False
     try:

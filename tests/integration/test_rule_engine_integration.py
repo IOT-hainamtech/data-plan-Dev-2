@@ -36,6 +36,11 @@ class RuleDatabaseTests(unittest.TestCase):
         self.assertEqual(dict(self.cur.fetchall()), {"TRIGGERED": 1, "CLEARED": 1})
         self.cur.execute("SELECT count(*) FROM alarm_outbox WHERE alarm_key IN (SELECT alarm_key FROM alarm_occurrences WHERE rule_code='S1_TEMP_HIGH')")
         self.assertEqual(self.cur.fetchone()[0], 2)
+        self.cur.execute("""SELECT payload_json->>'kind',payload_json->'event'->'data'->>'summary'
+            FROM alarm_occurrences WHERE rule_code='S1_TEMP_HIGH' ORDER BY triggered_at""")
+        payloads = self.cur.fetchall()
+        self.assertEqual([row[0] for row in payloads], ["occurrence", "cleared"])
+        self.assertTrue(all(row[1] for row in payloads))
 
     def test_s6_timer_duplicate_and_close(self):
         on_event(self.cur, device_id="DR-001", event_id="integration-open",

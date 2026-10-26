@@ -1,9 +1,11 @@
 """Contract-v1.3 proposed integration tests against real PostgreSQL and live API/Mock Bridge."""
 import copy,json,os,unittest,urllib.error,urllib.request,uuid
 
+from fastapi import HTTPException
+
 from core.database import db_connection
 from integrations.nextgrp import NextGrpAdapter
-from integrations.snapshot import reconcile_snapshot
+from integrations.snapshot import SnapshotClient,reconcile_snapshot
 
 @unittest.skipUnless(os.getenv("RUN_DEV1_TESTS")=="1","set RUN_DEV1_TESTS=1")
 class Dev1V13IntegrationTests(unittest.TestCase):
@@ -95,7 +97,13 @@ class Dev1V13IntegrationTests(unittest.TestCase):
 
     def test_07_bridge_202_and_duplicate_ack(self):
         adapter=NextGrpAdapter(self.bridge+"/internal/events/alarm",5,token="mock-development-token",allow_insecure_mock=True,require_202=True)
-        event=str(uuid.uuid4());payload={"event_id":event,"alarm_key":"wire:test","episode_key":"wire:test"}
+        event=str(uuid.uuid4()); alarm=f"wire:test:{event}"
+        payload={"event_id":event,"org_code":self.org,"alarm_key":alarm,"episode_key":alarm,
+            "kind":"occurrence","rule_id":self.rule,"rule_version":1,"device_id":self.device,
+            "zone_code":self.zone,"severity":"High","episode_start":"2026-10-22T03:00:00Z",
+            "occurrence_seq":1,"raised_at":"2026-10-22T03:05:00Z","event":{
+                "event_id":str(uuid.uuid4()),"event_type":"TEMPERATURE_HIGH",
+                "ts":"2026-10-22T03:05:00Z","data":{"summary":"Temperature high"}}}
         first=adapter.send("ignored",payload);second=adapter.send("ignored",payload)
         self.assertEqual(first.status,202);self.assertTrue(first.body["accepted"]);self.assertTrue(second.body["duplicate"]);self.assertEqual(first.body["ack_id"],second.body["ack_id"])
 
@@ -109,6 +117,40 @@ class Dev1V13IntegrationTests(unittest.TestCase):
             payload=copy.deepcopy(body);version=payload.pop(version_field)
             resources.append({"kind":kind,"key":key,"version":version,"payload":payload})
         snap={"contract_version":"1.3-proposed","org_code":self.org,"resources":resources}
-        result=reconcile_snapshot(snap,{self.org});self.assertEqual(len(result),6);self.assertTrue(all(item["duplicate"] for item in result))
+        snapshot_url=self.bridge+"/mock/v1/snapshot"
+        reset={"contract_version":"1.3-proposed","resources":[]}
+        def put_snapshot(value):
+            req=urllib.request.Request(snapshot_url,data=json.dumps(value).encode(),method="PUT",
+                headers={"Authorization":"Bearer mock-development-token","Content-Type":"application/json"})
+            with urllib.request.urlopen(req,timeout=5) as response:self.assertEqual(response.status,200)
+        put_snapshot(snap)
+        try:
+            fetched=SnapshotClient(self.bridge+"/internal/snapshot","mock-development-token",5,True).fetch()
+            result=reconcile_snapshot(fetched,{self.org});self.assertEqual(len(result),6);self.assertTrue(all(item["duplicate"] for item in result))
+        finally:
+            put_snapshot(reset)
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                for table,key_column,key in [("organizations","org_code",self.org),("sites","site_code",self.site),
+                    ("zones","zone_code",self.zone),("device_profiles","profile_code",self.profile),
+                    ("devices","device_id",self.device),("rule_definitions","rule_code",self.rule)]:
+                    cur.execute(f"SELECT config_version,payload_hash FROM {table} WHERE {key_column}=%s",(key,))
+                    version,digest=cur.fetchone();self.assertGreaterEqual(version,1);self.assertEqual(len(digest),64)
+        # Omission is not deletion: advance only Organization, then verify all
+        # other resources remain and the old Organization cannot overwrite v2.
+        org_v2=copy.deepcopy(self.org_body);org_v2.update(version=2,name="V13 Test Updated")
+        org_payload=copy.deepcopy(org_v2);org_payload.pop("version")
+        reconcile_snapshot({"contract_version":"1.3-proposed","org_code":self.org,
+            "resources":[{"kind":"organization","key":self.org,"version":2,"payload":org_payload}]},{self.org})
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT config_version FROM organizations WHERE org_code=%s",(self.org,));self.assertEqual(cur.fetchone()[0],2)
+                cur.execute("SELECT count(*) FROM devices WHERE device_id=%s",(self.device,));self.assertEqual(cur.fetchone()[0],1)
+                cur.execute("SELECT count(*) FROM rule_definitions WHERE rule_code=%s",(self.rule,));self.assertEqual(cur.fetchone()[0],1)
+        old_org=copy.deepcopy(self.org_body);old_org.pop("version")
+        with self.assertRaises(HTTPException) as stale:
+            reconcile_snapshot({"contract_version":"1.3-proposed","org_code":self.org,
+                "resources":[{"kind":"organization","key":self.org,"version":1,"payload":old_org}]},{self.org})
+        self.assertEqual(stale.exception.status_code,409)
         forbidden={**self.org_body,"org_code":"forbidden"};forbidden.pop("version")
         with self.assertRaises(PermissionError): reconcile_snapshot({"contract_version":"1.3-proposed","resources":[{"kind":"organization","version":1,"payload":forbidden}]},{self.org})

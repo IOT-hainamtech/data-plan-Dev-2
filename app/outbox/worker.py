@@ -10,7 +10,7 @@ import random
 import socket
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from core.clock import now_utc
 from core.database import db_connection
@@ -35,27 +35,35 @@ def validate_ack(body, alarm_key, event_id=None):
 
 class OutboxStore:
     def __init__(self, connection_factory=db_connection, alarm_key=None,
-                 table="alarm_outbox", key_column="alarm_key"):
+                 table="alarm_outbox", key_column="alarm_key", not_before=None):
         self.connection_factory = connection_factory
         self.alarm_key = alarm_key
         self.table, self.key_column = table, key_column
+        self.not_before = not_before
 
     def claim(self, worker_id, batch_size, lease_seconds, at):
+        filters = ""
+        params = [at, at]
+        if self.not_before is not None:
+            filters += " AND created_at >= %s"
+            params.append(self.not_before)
+        if self.alarm_key:
+            filters += f" AND {self.key_column}=%s"
+            params.append(self.alarm_key)
+        params.extend((batch_size, worker_id, at + timedelta(seconds=lease_seconds)))
         with self.connection_factory() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"""WITH candidates AS (
                     SELECT id FROM {self.table}
                     WHERE ((delivery_state='PENDING' AND next_attempt_at <= %s)
                        OR (delivery_state='IN_FLIGHT' AND locked_until <= %s))
-                    """ + (f" AND {self.key_column}=%s" if self.alarm_key else "") + f"""
+                    {filters}
                     ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT %s
                 ) UPDATE {self.table} o SET delivery_state='IN_FLIGHT',locked_by=%s,
                     locked_until=%s,attempt_count=o.attempt_count+1,last_error=NULL
                   FROM candidates c WHERE o.id=c.id
                   RETURNING o.id,o.{self.key_column},o.payload_json,o.attempt_count""",
-                    ((at, at, self.alarm_key, batch_size, worker_id,
-                      at + timedelta(seconds=lease_seconds)) if self.alarm_key else
-                     (at, at, batch_size, worker_id, at + timedelta(seconds=lease_seconds))))
+                    tuple(params))
                 rows = cur.fetchall()
             conn.commit()
         return rows
@@ -144,32 +152,66 @@ def _env_bool(name, default=False):
     return os.getenv(name, str(default)).lower() in ("1", "true", "yes")
 
 
+def bridge_settings():
+    mode = os.getenv("BRIDGE_MODE", "mock").strip().lower()
+    if mode not in ("mock", "real"):
+        raise ValueError("BRIDGE_MODE must be mock or real")
+    alarm_url = os.getenv("BRIDGE_ALARM_URL", os.getenv("NEXTGRP_ALARM_URL", ""))
+    status_url = os.getenv("BRIDGE_STATUS_URL", alarm_url)
+    token = os.getenv("BRIDGE_OUTBOUND_TOKEN") or os.getenv("NEXTGRP_AUTH_TOKEN")
+    if not alarm_url or not status_url:
+        raise ValueError("BRIDGE_ALARM_URL and BRIDGE_STATUS_URL are required")
+    if mode == "real":
+        if "mock-nextgrp" in alarm_url or "mock-nextgrp" in status_url:
+            raise ValueError("BRIDGE_MODE=real refuses Mock Bridge URLs")
+        if not token or token == "mock-development-token":
+            raise ValueError("BRIDGE_MODE=real requires BRIDGE_OUTBOUND_TOKEN")
+    return mode, alarm_url, status_url, token
+
+
+def delivery_not_before():
+    value = os.getenv("BRIDGE_DELIVER_NOT_BEFORE", "").strip()
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("BRIDGE_DELIVER_NOT_BEFORE must include a timezone")
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def main():
     if not _env_bool("OUTBOX_DELIVERY_ENABLED"):
         raise SystemExit("OUTBOX_DELIVERY_ENABLED is false; refusing external delivery")
+    mode, alarm_url, status_url, token = bridge_settings()
+    not_before = delivery_not_before()
+    allow_http = _env_bool("BRIDGE_ALLOW_INSECURE_HTTP",
+                           _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"))
     adapter = NextGrpAdapter(
-        os.getenv("BRIDGE_ALARM_URL",os.environ["NEXTGRP_ALARM_URL"]), float(os.getenv("NEXTGRP_TIMEOUT_SECONDS", "5")),
-        os.getenv("NEXTGRP_AUTH_MODE", "bearer"), os.getenv("NEXTGRP_AUTH_TOKEN"),
+        alarm_url, float(os.getenv("BRIDGE_TIMEOUT_SECONDS", "5")),
+        "bearer", token,
         os.getenv("NEXTGRP_API_KEY_HEADER", "X-API-Key"),
-        _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"), require_202=_env_bool("BRIDGE_REQUIRE_202",True))
+        allow_http, require_202=_env_bool("BRIDGE_REQUIRE_202",True))
     worker = OutboxWorker(
-        OutboxStore(), adapter, batch_size=int(os.getenv("OUTBOX_BATCH_SIZE", "20")),
+        OutboxStore(not_before=not_before), adapter, batch_size=int(os.getenv("OUTBOX_BATCH_SIZE", "20")),
         lease_seconds=int(os.getenv("OUTBOX_LEASE_SECONDS", "60")),
         max_attempts=int(os.getenv("OUTBOX_MAX_ATTEMPTS", "8")),
         base_seconds=float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS", "2")),
         max_seconds=float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS", "300")),
         jitter_ratio=float(os.getenv("OUTBOX_BACKOFF_JITTER", "0.2")))
     status_adapter = NextGrpAdapter(
-        os.getenv("BRIDGE_STATUS_URL",os.getenv("BRIDGE_ALARM_URL",os.environ["NEXTGRP_ALARM_URL"])),
-        float(os.getenv("NEXTGRP_TIMEOUT_SECONDS","5")),"bearer",os.getenv("BRIDGE_OUTBOUND_TOKEN",os.getenv("NEXTGRP_AUTH_TOKEN")),
-        allow_insecure_mock=_env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"),require_202=_env_bool("BRIDGE_REQUIRE_202",True))
-    status_worker = OutboxWorker(OutboxStore(table="status_outbox",key_column="delivery_event_id"),status_adapter,
+        status_url, float(os.getenv("BRIDGE_TIMEOUT_SECONDS","5")),"bearer",token,
+        allow_insecure_mock=allow_http,require_202=_env_bool("BRIDGE_REQUIRE_202",True))
+    status_worker = OutboxWorker(OutboxStore(table="status_outbox",key_column="delivery_event_id",
+        not_before=not_before),status_adapter,
         batch_size=int(os.getenv("OUTBOX_BATCH_SIZE","20")),lease_seconds=int(os.getenv("OUTBOX_LEASE_SECONDS","60")),
         max_attempts=int(os.getenv("OUTBOX_MAX_ATTEMPTS","8")),base_seconds=float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS","2")),
         max_seconds=float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS","300")),jitter_ratio=float(os.getenv("OUTBOX_BACKOFF_JITTER","0.2")))
     poll = max(0.1, float(os.getenv("OUTBOX_POLL_SECONDS", "1")))
     metrics_interval = max(1.0, float(os.getenv("OUTBOX_METRICS_SECONDS", "30")))
     next_metrics = 0.0
+    LOG.info("BRIDGE_MODE=%s alarm_host=%s status_host=%s delivery_not_before=%s", mode,
+             adapter.url.split("/", 3)[2], status_adapter.url.split("/", 3)[2],
+             not_before.isoformat() + "Z" if not_before else "unset")
     while True:
         try:
             processed = worker.run_once() + status_worker.run_once()

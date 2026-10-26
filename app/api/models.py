@@ -130,3 +130,49 @@ class AlarmStateIn(ContractModel):
     changed_at: datetime
     changed_by: str
     version: int = Field(ge=1)
+
+
+class BridgeEventIn(ContractModel):
+    event_id: str
+    event_type: str
+    ts: datetime
+    data: dict[str, Any]
+
+
+class BridgeAlarmIn(ContractModel):
+    event_id: str
+    org_code: str
+    alarm_key: str
+    episode_key: str
+    kind: Literal["occurrence", "cleared"]
+    rule_id: str
+    rule_version: int = Field(ge=1)
+    device_id: str
+    zone_code: str
+    severity: Literal["Low", "Medium", "High", "Critical"]
+    episode_start: datetime
+    occurrence_seq: int = Field(ge=1)
+    raised_at: datetime | None = None
+    cleared_at: datetime | None = None
+    event: BridgeEventIn
+
+    @model_validator(mode="after")
+    def valid_alarm_shape(self):
+        if self.alarm_key != self.episode_key:
+            raise ValueError("alarm_key and episode_key must identify the same episode")
+        if self.kind == "occurrence" and self.raised_at is None:
+            raise ValueError("occurrence requires raised_at")
+        if self.kind == "cleared" and self.cleared_at is None:
+            raise ValueError("cleared requires cleared_at")
+        return self
+
+
+class BridgeStatusIn(ContractModel):
+    event_id: str
+    org_code: str
+    device_id: str
+    state: Literal["online", "offline"]
+    since: datetime
+    last_seen: datetime | None = None
+    reason: Literal["telemetry", "lwt", "timeout"]
+    fw_version: str | None = None

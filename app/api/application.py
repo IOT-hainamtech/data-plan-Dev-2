@@ -61,41 +61,60 @@ def latest(device_id: str, org_code: str = Depends(tenant_org)):
             cur.execute("""SELECT DISTINCT ON (metric) metric, value_number, measured_at
                 FROM telemetry WHERE device_id=%s ORDER BY metric, measured_at DESC""", (device_id,))
             rows = cur.fetchall()
+            cur.execute("""SELECT event_id,event_type,event_at,payload_json
+                FROM device_events WHERE device_id=%s ORDER BY event_at DESC LIMIT 1""", (device_id,))
+            event = cur.fetchone()
+    latest_event = None
+    if event:
+        data = (event["payload_json"] or {}).get("data", {})
+        latest_event = {"event_id": event["event_id"], "event_type": event["event_type"],
+                        "event_at": event["event_at"].isoformat() + "Z",
+                        "door_state": data.get("door_state")}
     return {"device_id": device_id, "metrics": [
         {"metric": r["metric"], "value": r["value_number"],
-         "measured_at": r["measured_at"].isoformat() + "Z"} for r in rows]}
+         "measured_at": r["measured_at"].isoformat() + "Z"} for r in rows],
+         "latest_event": latest_event}
 
 
 @app.get("/api/v1/devices/{device_id}/telemetry")
 def telemetry(device_id: str, metric: str | None = None,
               limit: int = Query(default=100, ge=1, le=1000),
+              offset: int = Query(default=0, ge=0),
               org_code: str = Depends(tenant_org)):
     with db_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT device_id FROM devices WHERE device_id=%s AND org_code=%s AND enabled=TRUE", (device_id, org_code))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Device not found")
+            cur.execute("""SELECT count(*) FROM telemetry
+                WHERE device_id=%s AND (%s::text IS NULL OR metric=%s)""", (device_id, metric, metric))
+            total = cur.fetchone()["count"]
             cur.execute("""SELECT metric, value_number, measured_at FROM telemetry
                 WHERE device_id=%s AND (%s::text IS NULL OR metric=%s)
-                ORDER BY measured_at DESC LIMIT %s""", (device_id, metric, metric, limit))
+                ORDER BY measured_at DESC LIMIT %s OFFSET %s""", (device_id, metric, metric, limit, offset))
             rows = cur.fetchall()
-    return {"device_id": device_id, "points": [
+    return {"device_id": device_id, "total": total, "limit": limit, "offset": offset, "points": [
         {"metric": r["metric"], "value": r["value_number"],
          "measured_at": r["measured_at"].isoformat() + "Z"} for r in rows]}
 
 
 @app.get("/api/v1/devices")
-def list_devices(org_code: str = Depends(tenant_org)):
+def list_devices(org_code: str = Depends(tenant_org),
+                 limit: int = Query(default=100, ge=1, le=500),
+                 offset: int = Query(default=0, ge=0),
+                 ):
     with db_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT count(*) FROM devices WHERE org_code=%s", (org_code,))
+            total = cur.fetchone()["count"]
             cur.execute("""SELECT d.device_id, d.org_code, d.site_code, d.zone_code,
                 d.profile_code, d.telemetry_interval_seconds, d.heartbeat_interval_seconds, d.enabled,
                 s.current_state, s.received_at AS status_updated_at, s.last_seen_at, s.boot_id
                 FROM devices d
                 LEFT JOIN device_status s ON d.device_id = s.device_id
-                WHERE d.org_code=%s ORDER BY d.device_id""", (org_code,))
+                WHERE d.org_code=%s ORDER BY d.device_id LIMIT %s OFFSET %s""", (org_code, limit, offset))
             rows = cur.fetchall()
-    return {"devices": [
+    return {"total": total, "limit": limit, "offset": offset, "devices": [
         {"device_id": r["device_id"], "org_code": r["org_code"], "site_code": r["site_code"],
          "zone_code": r["zone_code"], "profile_code": r["profile_code"],
          "telemetry_interval_seconds": r["telemetry_interval_seconds"],
@@ -150,17 +169,20 @@ def device_status_detail(device_id: str, history_limit: int = Query(default=20, 
 
 @app.get("/api/v1/devices/{device_id}/events")
 def device_events(device_id: str, limit: int = Query(default=50, ge=1, le=500),
+                  offset: int = Query(default=0, ge=0),
                   org_code: str = Depends(tenant_org)):
     with db_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT device_id FROM devices WHERE device_id=%s AND org_code=%s AND enabled=TRUE", (device_id, org_code))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Device not found")
+            cur.execute("SELECT count(*) FROM device_events WHERE device_id=%s", (device_id,))
+            total = cur.fetchone()["count"]
             cur.execute("""SELECT event_id, event_type, boot_id, seq, event_at, received_at, payload_json
                 FROM device_events WHERE device_id=%s
-                ORDER BY event_at DESC LIMIT %s""", (device_id, limit))
+                ORDER BY event_at DESC LIMIT %s OFFSET %s""", (device_id, limit, offset))
             rows = cur.fetchall()
-    return {"device_id": device_id, "events": [
+    return {"device_id": device_id, "total": total, "limit": limit, "offset": offset, "events": [
         {"event_id": r["event_id"], "event_type": r["event_type"], "boot_id": r["boot_id"],
          "seq": r["seq"], "event_at": r["event_at"].isoformat() + "Z",
          "received_at": r["received_at"].isoformat() + "Z", "payload": r["payload_json"]}
@@ -168,22 +190,30 @@ def device_events(device_id: str, limit: int = Query(default=50, ge=1, le=500),
     ]}
 @app.get("/api/v1/alarms")
 def list_alarms(limit: int = Query(default=50, ge=1, le=500),
+                offset: int = Query(default=0, ge=0),
                 org_code: str = Depends(tenant_org)):
     with db_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT count(*) FROM alarm_occurrences a
+                JOIN devices d ON d.device_id=a.device_id AND d.org_code=%s""", (org_code,))
+            total = cur.fetchone()["count"]
             cur.execute("""SELECT a.alarm_key, a.episode_key, a.rule_code, a.device_id, a.severity,
                 a.occurrence_kind, a.event_type, a.triggered_at, a.cleared_at, a.payload_json,
-                o.delivery_state, o.attempt_count, o.ack_id, o.delivered_at
+                o.delivery_state, o.attempt_count, o.ack_id, o.delivered_at,l.state AS lifecycle_state
                 FROM alarm_occurrences a
                 JOIN devices d ON d.device_id=a.device_id AND d.org_code=%s
                 LEFT JOIN alarm_outbox o ON a.alarm_key = o.alarm_key
-                ORDER BY a.triggered_at DESC LIMIT %s""", (org_code, limit))
+                LEFT JOIN alarm_lifecycle l ON l.wire_alarm_key=a.payload_json->>'alarm_key'
+                ORDER BY a.triggered_at DESC LIMIT %s OFFSET %s""", (org_code, limit, offset))
             rows = cur.fetchall()
-    return {"alarms": [
+    return {"total": total, "limit": limit, "offset": offset, "alarms": [
         {"alarm_key": r["alarm_key"], "episode_key": r["episode_key"], "rule_code": r["rule_code"],
          "device_id": r["device_id"], "severity": r["severity"], "occurrence_kind": r["occurrence_kind"],
          "event_type": r["event_type"], "triggered_at": r["triggered_at"].isoformat() + "Z",
+         "raised_at": r["payload_json"].get("raised_at"),
          "cleared_at": r["cleared_at"].isoformat() + "Z" if r["cleared_at"] else None,
+         "status": r["lifecycle_state"] or ("cleared" if r["occurrence_kind"] == "CLEARED" else "open"),
+         "summary": r["payload_json"].get("event", {}).get("data", {}).get("summary") or r["event_type"],
          "delivery_state": r["delivery_state"] or "UNKNOWN", "attempt_count": r["attempt_count"],
          "ack_id": r["ack_id"], "delivered_at": r["delivered_at"].isoformat() + "Z" if r["delivered_at"] else None}
         for r in rows

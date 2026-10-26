@@ -2,12 +2,13 @@
 __pycache__/
 *.pyc
 *.bak
-.vscode/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
 .secrets/
 mosquitto/certs/
 firmware/.pio/
 firmware/.venv/
-firmware/.vscode/
 firmware/certs/mqtt_ca.pem
 firmware/config/nvs.csv
 firmware/config/nvs.bin

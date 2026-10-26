@@ -139,16 +139,14 @@ class EndToEndSimulatorTests(unittest.TestCase):
         self.assertIsNotNone(alarm_key, "S1 alarm was not created after 300 continuous seconds")
         self.alarm_keys.append(alarm_key)
 
-        # Deliver this exact alarm and require a valid ACK from mock nextGRP.
-        self.worker.store = OutboxStore(alarm_key=alarm_key)
-        self.worker.run_once()
+        # The separately running outbox-worker service must deliver this row.
         deadline = time.monotonic() + 5
-        delivery_state = ack_id = None
+        delivery_state = ack_id = delivery_event_id = None
         while time.monotonic() < deadline:
             with db_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT delivery_state, ack_id FROM alarm_outbox WHERE alarm_key=%s", (alarm_key,))
-                    delivery_state, ack_id = cur.fetchone()
+                    cur.execute("SELECT delivery_state,ack_id,delivery_event_id FROM alarm_outbox WHERE alarm_key=%s", (alarm_key,))
+                    delivery_state, ack_id, delivery_event_id = cur.fetchone()
             if delivery_state == "DELIVERED":
                 break
             time.sleep(0.1)
@@ -160,6 +158,56 @@ class EndToEndSimulatorTests(unittest.TestCase):
                 self.assertIsNotNone(last_seen)
                 self.assertEqual(delivery_state, "DELIVERED")
                 self.assertTrue(bool(ack_id))
+
+        # Drive the same episode through its deterministic clear transition.
+        client, reason = connected_client(self.th2_user, self.th2_pass, self.ca)
+        self.assertFalse(reason.is_failure)
+        for seq, seconds in enumerate((301, 361, 421), start=7):
+            body = {"schema_version": 1, "device_id": "TH-002", "boot_id": self.boot_id,
+                    "seq": seq, "ts": (base + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z"),
+                    "quality": "good", "data": {"temperature": 28.0, "humidity": 52.0}}
+            client.publish(topic, json.dumps(body), qos=1).wait_for_publish(5)
+        client.disconnect(); client.loop_stop()
+        clear_key = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            with db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT a.alarm_key,o.delivery_state FROM alarm_occurrences a
+                        JOIN alarm_outbox o ON o.alarm_key=a.alarm_key
+                        WHERE a.rule_code='S1_TH002_TEMP_HIGH' AND a.device_id='TH-002'
+                          AND a.occurrence_kind='CLEARED' AND a.triggered_at >= %s
+                        ORDER BY a.id DESC LIMIT 1""", (received_after,))
+                    row = cur.fetchone()
+                    if row and row[1] == "DELIVERED":
+                        clear_key = row[0]
+                        break
+            time.sleep(0.2)
+        self.assertIsNotNone(clear_key, "S1 cleared event was not delivered by outbox-worker")
+        self.alarm_keys.append(clear_key)
+
+        # Simulate at-least-once replay for this test event only. The real worker
+        # must receive the same ACK and Mock inbox must keep one event_id row.
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE alarm_outbox SET delivery_state='PENDING',next_attempt_at=now() at time zone 'utc',
+                    delivered_at=NULL,acked_at=NULL,locked_by=NULL,locked_until=NULL WHERE alarm_key=%s""", (alarm_key,))
+            conn.commit()
+        deadline = time.monotonic() + 5
+        replay_ack = None
+        while time.monotonic() < deadline:
+            with db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT delivery_state,ack_id FROM alarm_outbox WHERE alarm_key=%s", (alarm_key,))
+                    state, replay_ack = cur.fetchone()
+                    cur.execute("SELECT count(*) FROM bridge_event_inbox WHERE event_id=%s", (str(delivery_event_id),))
+                    inbox_count = cur.fetchone()[0]
+            if state == "DELIVERED":
+                break
+            time.sleep(0.1)
+        self.assertEqual(state, "DELIVERED")
+        self.assertEqual(replay_ack, ack_id)
+        self.assertEqual(inbox_count, 1)
 
     def test_e2e_s6_door_event_and_outbox_ack(self):
         # Snapshot and temporarily isolate the durable demo runtime while the
@@ -222,9 +270,7 @@ class EndToEndSimulatorTests(unittest.TestCase):
         self.assertIsNotNone(occurrence, "S6 event did not create an alarm occurrence")
         self.alarm_keys.append(occurrence[0])
 
-        # Run outbox worker to deliver any pending outbox rows to mock nextGRP
-        self.worker.store = OutboxStore(alarm_key=occurrence[0])
-        self.worker.run_once()
+        # The separately running outbox-worker service delivers this row.
         deadline = time.monotonic() + 5
         delivery_state = ack_id = None
         while time.monotonic() < deadline:

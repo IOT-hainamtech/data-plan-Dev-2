@@ -4,7 +4,8 @@ from integrations.snapshot import SnapshotClient,reconcile_snapshot
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(message)s")
 LOG=logging.getLogger("snapshot-worker")
 def main():
-    client=SnapshotClient(os.environ["BRIDGE_SNAPSHOT_URL"],os.environ["BRIDGE_OUTBOUND_TOKEN"],
+    token=os.getenv("BRIDGE_SNAPSHOT_TOKEN") or os.environ["BRIDGE_OUTBOUND_TOKEN"]
+    client=SnapshotClient(os.environ["BRIDGE_SNAPSHOT_URL"],token,
         float(os.getenv("BRIDGE_TIMEOUT_SECONDS","10")),os.getenv("BRIDGE_ALLOW_INSECURE_MOCK","false").lower()=="true")
     allowed={x.strip() for x in os.getenv("BRIDGE_ALLOWED_ORGS","").split(",") if x.strip()}
     interval=max(30,int(os.getenv("SNAPSHOT_INTERVAL_SECONDS","300")))

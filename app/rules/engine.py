@@ -85,6 +85,13 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
                      ("S6", "TRIGGERED"): "DOOR_OPENED",
                      ("S6", "CLEARED"): "DOOR_CLOSED"}
                     .get((rule_code.split("_")[0], occurrence_kind), event_type))
+    summary = ({("S1", "TRIGGERED"): f"Temperature high on {device_id}",
+                ("S1", "CLEARED"): f"Temperature recovered on {device_id}",
+                ("S6", "TRIGGERED"): f"Door opened on {device_id}",
+                ("S6", "CLEARED"): f"Door closed on {device_id}"}
+               .get((rule_code.split("_")[0], occurrence_kind),
+                    f"{mapped_event} on {device_id}"))
+    details = {**details, "summary": summary}
     cur.execute("""SELECT d.org_code,d.zone_code,r.config_version
         FROM devices d JOIN rule_definitions r ON r.rule_code=%s WHERE d.device_id=%s""",
         (rule_code,device_id))
@@ -92,7 +99,9 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
     severity_wire={"INFO":"Low","WARNING":"Medium","HIGH":"High","CRITICAL":"Critical"}.get(severity,severity)
     event_id=str(uuid.uuid5(uuid.NAMESPACE_URL,f"nextwireless:source:{alarm_key}"))
     payload={"event_id":delivery_event_id,"org_code":org_code,"alarm_key":wire_alarm_key,
-        "episode_key":wire_alarm_key,"kind":occurrence_kind.lower(),"rule_id":rule_code,
+        "episode_key":wire_alarm_key,
+        "kind":"occurrence" if occurrence_kind=="TRIGGERED" else "cleared",
+        "rule_id":rule_code,
         "rule_version":max(1,rule_version),"device_id":device_id,"zone_code":zone_code,
         "severity":severity_wire,"episode_start":episode_started.isoformat(timespec="milliseconds")+"Z",
         "occurrence_seq":1,"event":{"event_id":event_id,"event_type":mapped_event,

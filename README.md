@@ -127,7 +127,7 @@ Do not run `docker compose down -v` when the PostgreSQL or MQTT volumes must be 
 | `NEXTGRP_*` | Mock only in Compose | Provisional receiver URL/auth settings |
 
 Never commit `.env`, `.secrets/`, private keys, generated NVS images or device passwords. LAN
-exposure is opt-in and must follow [MQTT_LAN.md](docs/MQTT_LAN.md); no LAN IP is a repository-wide
+exposure is opt-in and must follow [MQTT_LAN.md](docs/hardware/MQTT_LAN.md); no LAN IP is a repository-wide
 default.
 
 ## Testing
@@ -183,9 +183,9 @@ firmware\.venv\Scripts\python.exe -m unittest discover -s firmware\tests -v
 Provisioning requires a confirmed broker hostname/IP that appears in the certificate SAN. See:
 
 - [Firmware overview](firmware/README.md)
-- [ESP32 provisioning](docs/ESP32_PROVISIONING.md)
-- [Hardware setup](docs/ESP32_HARDWARE_SETUP.md)
-- [Functional checklist](docs/ESP32_TEST_CHECKLIST.md)
+- [ESP32 provisioning](docs/hardware/ESP32_PROVISIONING.md)
+- [Hardware setup](docs/hardware/ESP32_HARDWARE_SETUP.md)
+- [Functional checklist](docs/hardware/ESP32_TEST_CHECKLIST.md)
 
 Physical-device validation remains pending.
 
@@ -213,24 +213,24 @@ GET /api/v1/alarms
 
 Related documentation:
 
-- [Multi-organization design](docs/MULTI_ORG_SITE_DESIGN.md)
-- [Dev1/nextGRP boundary](docs/DEV1_DATA_PLANE_INTEGRATION.md)
+- [Dev 1 integration handoff](docs/integration/DEV1_INTEGRATION_HANDOFF.md)
+- [Dev 1 Dashboard API guide](docs/integration/DEV1_DASHBOARD_API_GUIDE.md)
+- [Dev 1 pending confirmations](docs/integration/DEV1_PENDING_CONFIRMATIONS.md)
+- [Dev 2 final validation report](docs/M1_DEV2_FINAL_REPORT.md)
 - [Technical notes](docs/TECH_NOTES.md)
-- [Project structure audit](docs/PROJECT_STRUCTURE_AUDIT.md)
-- [Data Plane stabilization evidence](docs/DATA_PLANE_STABILIZATION_REPORT.md)
 
 ## Current Status
 
 - Software behavior is implemented for the M1 simulator and local Compose environment.
-- SQL migrations 001–008 are canonical under `db/migrations/`.
+- SQL migrations 001–010 are canonical under `db/migrations/`.
 - Multi-organization registry and scoped rule runtime are implemented.
 - nextGRP delivery remains a provisional mock contract.
 - ESP32 source builds exist, but physical hardware acceptance is pending.
 - Production identity/RBAC, control-plane synchronization, retention, backup and scale benchmarks
   are not complete.
 
-See [SOURCE_REFACTOR_REPORT.md](docs/SOURCE_REFACTOR_REPORT.md) for the validation status of this
-refactor.
+See the [Dev 2 final report](docs/M1_DEV2_FINAL_REPORT.md) for current validation and handoff
+readiness evidence.
 
 ## Roadmap
 

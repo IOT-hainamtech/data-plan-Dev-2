@@ -8,6 +8,7 @@ import time
 
 import psycopg
 from psycopg.types.json import Jsonb
+import paho.mqtt as paho_mqtt
 import paho.mqtt.client as mqtt
 
 from core.clock import now_utc
@@ -175,7 +176,7 @@ def main():
         try:
             client.connect(mqtt_host, mqtt_port, keepalive=60)
             client.loop_forever(retry_first_connection=True)
-        except (OSError, ssl.SSLError, mqtt.MQTTException) as exc:
+        except (OSError, ssl.SSLError, paho_mqtt.MQTTException) as exc:
             LOG.warning("MQTT unavailable (%s), retrying", exc)
             time.sleep(3)
 

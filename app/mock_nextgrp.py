@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from psycopg.types.json import Jsonb
 
 from core.database import db_connection
+from api.models import BridgeAlarmIn, BridgeStatusIn
 
 app = FastAPI(title="Mock nextGRP Alarm API", version="mock-1")
 _lock = Lock()
@@ -55,9 +56,9 @@ def metrics():
     with _lock:
         return {"unique_alarms": len(_acks)}
 
-async def _bridge_event(request, idempotency_key, authorization, kind, response):
+async def _bridge_event(request, idempotency_key, authorization, kind, response, validated):
     if not _authorized(authorization,None): raise HTTPException(401,"invalid mock credentials")
-    payload=await request.json()
+    payload=validated.model_dump(mode="json", exclude_none=True)
     if payload.get("event_id")!=idempotency_key: raise HTTPException(400,"event_id/idempotency mismatch")
     mode=request.headers.get("X-Mock-Mode")
     if mode=="error": raise HTTPException(503,"simulated unavailable")
@@ -80,12 +81,12 @@ async def _bridge_event(request, idempotency_key, authorization, kind, response)
             "alarm_key":payload.get("alarm_key"),"ack_id":ack_id}
 
 @app.post("/internal/events/alarm")
-async def bridge_alarm(request:Request,response:Response,idempotency_key:str=Header(alias="Idempotency-Key"),authorization:str|None=Header(default=None)):
-    return await _bridge_event(request,idempotency_key,authorization,"alarm",response)
+async def bridge_alarm(payload:BridgeAlarmIn,request:Request,response:Response,idempotency_key:str=Header(alias="Idempotency-Key"),authorization:str|None=Header(default=None)):
+    return await _bridge_event(request,idempotency_key,authorization,"alarm",response,payload)
 
 @app.post("/internal/events/status")
-async def bridge_status(request:Request,response:Response,idempotency_key:str=Header(alias="Idempotency-Key"),authorization:str|None=Header(default=None)):
-    result=await _bridge_event(request,idempotency_key,authorization,"status",response)
+async def bridge_status(payload:BridgeStatusIn,request:Request,response:Response,idempotency_key:str=Header(alias="Idempotency-Key"),authorization:str|None=Header(default=None)):
+    result=await _bridge_event(request,idempotency_key,authorization,"status",response,payload)
     result["alarm_key"]=idempotency_key
     return result
 

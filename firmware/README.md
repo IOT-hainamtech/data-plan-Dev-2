@@ -76,7 +76,7 @@ MQTT credentials for TH-001 and DR-001.
 
 For the repeatable Windows workflow, device-specific templates, secure prompts,
 overwrite protection, exact flash commands and recovery steps, use
-[`../docs/ESP32_PROVISIONING.md`](../docs/ESP32_PROVISIONING.md).
+[`../docs/hardware/ESP32_PROVISIONING.md`](../docs/hardware/ESP32_PROVISIONING.md).
 
 ## Hardware mapping
 
