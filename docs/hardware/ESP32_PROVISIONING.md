@@ -5,8 +5,8 @@ enter secrets at the prompt; do not paste them into tickets, chat, or serial log
 
 ## Prerequisites
 
-1. Confirm Wi-Fi is 2.4 GHz and the broker host is still `192.168.1.87`.
-2. Confirm `mosquitto/certs/server.crt` has SAN `IP:192.168.1.87`.
+1. Confirm Wi-Fi is 2.4 GHz and the broker host is still `192.168.1.40`.
+2. Confirm `mosquitto/certs/server.crt` has SAN `IP:192.168.1.40`.
 3. Confirm the broker accounts remain `TH-001` and `DR-001` with their existing ACLs.
 4. Build firmware and keep `mosquitto/certs/ca.key` and `server.key` off devices.
 
@@ -22,6 +22,13 @@ printing them:
 ```powershell
 .\scripts\new-esp32-nvs.ps1 -DeviceId TH-001 -UseExistingMqttSecret
 .\scripts\new-esp32-nvs.ps1 -DeviceId DR-001 -UseExistingMqttSecret
+```
+
+If the broker address changes, pass it explicitly instead of editing committed templates:
+
+```powershell
+.\scripts\new-esp32-nvs.ps1 -DeviceId TH-001 -MqttHost 192.168.1.40
+.\scripts\new-esp32-nvs.ps1 -DeviceId DR-001 -MqttHost 192.168.1.40
 ```
 
 The script prompts locally for Wi-Fi SSID/password, embeds only the public CA,
@@ -72,11 +79,13 @@ DR-001 uses `-e reed_door` and `config\nvs.DR-001.bin`.
 |---|---|---|
 | Profile | `TEMP_HUM_SENSOR` | `DOOR_SENSOR` |
 | Sensor | `sht31` | `reed_door` |
-| Broker | `mqtts://192.168.1.87:8883` | same |
+| Broker | `mqtts://192.168.1.40:8883` | same |
 | Org/site | `demo` / `demo-site` | same |
 | Period | telemetry 60 s | heartbeat 60 s |
 | Pins | SDA 21, SCL 22 | GPIO27, `INPUT_PULLUP` |
 | Sensor options | address 0x44/0x45; T/RH offsets | debounce 50 ms; closed level 0/1 |
+
+The `sht31` and `reed_door` builds embed different expected sensor roles. Firmware rejects an NVS image whose `sensor_type` belongs to the other environment; this prevents accidentally operating TH-001 as a door node or DR-001 as an SHT31 node.
 
 The firmware waits for NTP before TLS, verifies the CA and SAN, uses MQTT 3.1.1,
 QoS 1/PUBACK tracking, retained birth/LWT, three in-flight messages, stable retry

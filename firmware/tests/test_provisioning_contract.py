@@ -18,7 +18,7 @@ class ProvisioningContractTests(unittest.TestCase):
         self.assertEqual(values["mqtt_username"]["value"], "TH-001")
         self.assertEqual(values["sensor_type"]["value"], "sht31")
         self.assertEqual(values["profile_code"]["value"], "TEMP_HUM_SENSOR")
-        self.assertEqual(values["mqtt_uri"]["value"], "mqtts://192.168.1.87:8883")
+        self.assertEqual(values["mqtt_uri"]["value"], "mqtts://192.168.1.40:8883")
         self.assertEqual(values["sht31_address"]["value"], "68")
         self.assertEqual(values["telemetry_sec"]["value"], "60")
 
@@ -28,6 +28,7 @@ class ProvisioningContractTests(unittest.TestCase):
         self.assertEqual(values["mqtt_username"]["value"], "DR-001")
         self.assertEqual(values["sensor_type"]["value"], "reed_door")
         self.assertEqual(values["profile_code"]["value"], "DOOR_SENSOR")
+        self.assertEqual(values["mqtt_uri"]["value"], "mqtts://192.168.1.40:8883")
         self.assertEqual(values["door_closed_lvl"]["value"], "0")
         self.assertEqual(values["door_debounce"]["value"], "50")
         self.assertEqual(values["heartbeat_sec"]["value"], "60")

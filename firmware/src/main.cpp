@@ -42,9 +42,17 @@ extern "C" void app_main() {
     Sht31Driver sht31; ReedDoorDriver door;
     if (config.sensor_type == SensorType::Sht31) {
         if (!sht31.begin(config.sht31_address, config.temperature_offset, config.humidity_offset)) {
-            ESP_LOGE(TAG, "SHT31 I2C initialization failed");
+            ESP_LOGE(TAG, "SHT31 not responding at 0x%02x on SDA=21/SCL=22; error telemetry will be sent",
+                     config.sht31_address);
+        } else {
+            ESP_LOGI(TAG, "SHT31 ready at 0x%02x on SDA=21/SCL=22", config.sht31_address);
         }
-    } else door.begin(config.door_closed_level, config.door_debounce_ms);
+    } else {
+        door.begin(config.door_closed_level, config.door_debounce_ms);
+        ESP_LOGI(TAG, "MC-38 ready on GPIO27 INPUT_PULLUP closed_level=%d debounce_ms=%lu initial=%s",
+                 config.door_closed_level, static_cast<unsigned long>(config.door_debounce_ms),
+                 door.is_open() ? "open" : "closed");
+    }
 
     esp_task_wdt_config_t watchdog{.timeout_ms = 15000, .idle_core_mask = 0, .trigger_panic = true};
     esp_task_wdt_init(&watchdog); esp_task_wdt_add(nullptr);
@@ -76,6 +84,7 @@ extern "C" void app_main() {
                 pending_periodic_topic = nw::topic(config.org_code, config.site_code,
                                                     config.device_id, "telemetry");
             } else {
+                ESP_LOGW(TAG, "SHT31 read failed or outside backend range; publishing quality=error");
                 pending_periodic = PayloadBuilder::telemetry_error(config.device_id,
                     sequence.boot_id(), pending_periodic_seq, ts);
                 pending_periodic_topic = nw::topic(config.org_code, config.site_code,
@@ -84,11 +93,17 @@ extern "C" void app_main() {
             last_telemetry = now;
         }
         if (config.sensor_type == SensorType::ReedDoor) {
-            bool changed = false; bool open = door.poll(changed);
-            if (changed && pending_event.empty() && timestamp(ts)) {
-                pending_event_seq = sequence.next();
-                pending_event = PayloadBuilder::door_event(config.device_id, sequence.boot_id(),
-                    pending_event_seq, ts, open, sequence.event_id(config.device_id, pending_event_seq));
+            // Do not advance the debounced stable state while an older transition is awaiting MQTT.
+            // Once it is accepted, polling resumes and any physical change is debounced and emitted.
+            if (pending_event.empty()) {
+                bool changed = false; bool open = door.poll(changed);
+                if (changed && timestamp(ts)) {
+                    pending_event_seq = sequence.next();
+                    pending_event = PayloadBuilder::door_event(config.device_id, sequence.boot_id(),
+                        pending_event_seq, ts, open, sequence.event_id(config.device_id, pending_event_seq));
+                    ESP_LOGI(TAG, "Door transition=%s seq=%llu", open ? "OPEN" : "CLOSED",
+                             static_cast<unsigned long long>(pending_event_seq));
+                }
             }
             if (!pending_event.empty() && mqtt.publish(
                     nw::topic(config.org_code, config.site_code, config.device_id, "event"),

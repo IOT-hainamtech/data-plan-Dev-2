@@ -79,10 +79,10 @@ services:
     restart: unless-stopped
     environment:
       <<: *runtime_env
-      DP_INBOUND_TOKEN: ${DP_INBOUND_TOKEN:-mock-data-plane-inbound-token}
+      DP_INBOUND_TOKEN: ${DP_INBOUND_TOKEN:?Set DP_INBOUND_TOKEN to a private service token}
       DP_INBOUND_ALLOWED_ORGS: ${DP_INBOUND_ALLOWED_ORGS:-demo,v13-test}
     ports:
-      - "192.168.1.87:8002:8000"
+      - "${DATA_API_BIND_IP:-127.0.0.1}:8002:8000"
     depends_on:
       postgres:
         condition: service_healthy

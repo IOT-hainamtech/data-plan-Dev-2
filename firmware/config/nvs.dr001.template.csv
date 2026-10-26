@@ -2,7 +2,7 @@ key,type,encoding,value
 nwcfg,namespace,,
 wifi_ssid,data,string,__WIFI_SSID__
 wifi_password,data,string,__WIFI_PASSWORD__
-mqtt_uri,data,string,mqtts://192.168.1.87:8883
+mqtt_uri,data,string,mqtts://192.168.1.40:8883
 mqtt_username,data,string,DR-001
 mqtt_password,data,string,__MQTT_PASSWORD__
 mqtt_ca,data,binary,certs/mqtt_ca.pem

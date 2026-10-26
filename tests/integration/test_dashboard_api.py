@@ -34,6 +34,17 @@ class DashboardApiTests(unittest.TestCase):
         self.assertGreaterEqual(body["total"], 1)
         self.assertIn("last_seen_at", body["devices"][0])
 
+    def test_outbox_metrics_requires_auth_and_tenant_scope(self):
+        self.assertEqual(self.get("/api/v1/outbox/metrics", token=False)[0], 401)
+        self.assertEqual(self.get("/api/v1/outbox/metrics", org=None)[0], 400)
+        self.assertEqual(self.get("/api/v1/outbox/metrics", org="not-allowed")[0], 403)
+        status, body = self.get("/api/v1/outbox/metrics")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {
+            "pending", "failed", "delivery_failures", "oldest_pending_age_seconds"
+        })
+        self.assertTrue(all(body[name] >= 0 for name in body))
+
     def test_s1_latest_and_history(self):
         status, body = self.get("/api/v1/devices/TH-001/latest")
         self.assertEqual(status, 200)

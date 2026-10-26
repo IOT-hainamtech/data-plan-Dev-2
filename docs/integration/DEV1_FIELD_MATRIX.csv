@@ -1,0 +1,113 @@
+﻿Module,Entity,Field Name,UI Label,Data Type,Required,Nullable,Default,Enum,Unit,Source Table,API,Read Write,UI Component,Description,Source File,Verification Status
+Management,Organization API,org_code,Organization Code,string,Yes,No,,,,”organizations”,PUT /api/v1/sync/organizations/{org_code},Editable,Link,Stable organization identifier,app/api/models.py,VERIFIED
+Management,Organization API,name,Organization Name,string,Yes,No,,,,organizations,PUT /api/v1/sync/organizations/{org_code},Editable,Text,Display name mapped to display_name,app/api/integration.py,VERIFIED
+Management,Organization API,version,Config Version,int,Yes,No,,>=1,,organizations,PUT /api/v1/sync/organizations/{org_code},Editable,Number,Monotonic resource version,app/api/models.py,VERIFIED
+Management,Organization API,enabled,Enabled,boolean,No,No,true,,,organizations,PUT /api/v1/sync/organizations/{org_code},Editable,Check,Enable organization,app/api/models.py,VERIFIED
+Management,Site API,org_code,Organization Code,string,Yes,No,,,,sites,PUT /api/v1/sync/sites/{org_code}/{site_code},Editable,Link,Parent organization,app/api/models.py,VERIFIED
+Management,Site API,site_code,Site Code,string,Yes,No,,,,sites,PUT /api/v1/sync/sites/{org_code}/{site_code},Editable,Text,Site identifier within organization,app/api/models.py,VERIFIED
+Management,Site API,name,Site Name,string,Yes,No,,,,sites,PUT /api/v1/sync/sites/{org_code}/{site_code},Editable,Text,Display name,app/api/integration.py,VERIFIED
+Management,Site API,version,Config Version,int,Yes,No,,>=1,,sites,PUT /api/v1/sync/sites/{org_code}/{site_code},Editable,Number,Monotonic version,app/api/models.py,VERIFIED
+Management,Site API,timezone,Timezone,string,No,No,UTC,,,sites,PUT /api/v1/sync/sites/{org_code}/{site_code},Editable,Select,IANA timezone expected,app/api/models.py,VERIFIED
+Management,Zone API,org_code,Organization Code,string,Yes,No,,,,zones,PUT /api/v1/sync/zones/{org_code}/{site_code}/{zone_code},Editable,Link,Organization scope,app/api/models.py,VERIFIED
+Management,Zone API,site_code,Site Code,string,Yes,No,,,,zones,PUT /api/v1/sync/zones/{org_code}/{site_code}/{zone_code},Editable,Link,Site scope,app/api/models.py,VERIFIED
+Management,Zone API,zone_code,Zone Code,string,Yes,No,,,,zones,PUT /api/v1/sync/zones/{org_code}/{site_code}/{zone_code},Editable,Text,Zone identifier within site,app/api/models.py,VERIFIED
+Management,Zone API,name,Zone Name,string,Yes,No,,,,zones,PUT /api/v1/sync/zones/{org_code}/{site_code}/{zone_code},Editable,Text,Display name,app/api/integration.py,VERIFIED
+Management,Zone API,version,Config Version,int,Yes,No,,>=1,,zones,PUT /api/v1/sync/zones/{org_code}/{site_code}/{zone_code},Editable,Number,Monotonic version,app/api/models.py,VERIFIED
+Management,Profile API,profile_code,Profile Code,string,Yes,No,,,,device_profiles,PUT /api/v1/sync/profiles/{profile_code},Editable,Text,Global profile key,app/api/models.py,VERIFIED
+Management,Profile API,version,Config Version,int,Yes,No,,>=1,,device_profiles,PUT /api/v1/sync/profiles/{profile_code},Editable,Number,Monotonic version,app/api/models.py,VERIFIED
+Management,Profile API,signal_model,Signal Model,enum,Yes,No,,TELEMETRY|EVENT,,device_profiles.metadata_json,PUT /api/v1/sync/profiles/{profile_code},Editable,Select,Signal behavior,app/api/models.py,VERIFIED
+Management,Profile API,protocol,Protocol,enum,Yes,No,,MQTT,,device_profiles.metadata_json,PUT /api/v1/sync/profiles/{profile_code},Editable,Select,Transport protocol,app/api/models.py,VERIFIED
+Management,Profile API,expected_interval_s,Expected Interval,int,Yes,No,,>0,s,device_profiles.metadata_json,PUT /api/v1/sync/profiles/{profile_code},Editable,Number,Expected telemetry interval,app/api/models.py,VERIFIED
+Management,Profile API,heartbeat_interval_s,Heartbeat Interval,int,Yes,No,,>0,s,device_profiles.metadata_json,PUT /api/v1/sync/profiles/{profile_code},Editable,Number,Heartbeat interval,app/api/models.py,VERIFIED
+Management,Profile API,offline_after_missed,Offline After Missed,int,Yes,No,,>0,count,device_profiles.metadata_json,PUT /api/v1/sync/profiles/{profile_code},Editable,Number,Miss count configuration,app/api/models.py,VERIFIED
+Management,Profile API,data_points,Data Points,array,No,No,[],,,device_profile_points,PUT /api/v1/sync/profiles/{profile_code},Editable,Table,Profile points,app/api/models.py,VERIFIED
+Management,Profile API,event_types,Event Types,array,No,No,[],,,device_profile_events,PUT /api/v1/sync/profiles/{profile_code},Editable,Table,Profile events,app/api/models.py,VERIFIED
+Management,Profile Point,code,Point Code,string,Yes,No,,,,device_profile_points,Profile body,Editable,Text,Point identifier,app/api/models.py,VERIFIED
+Management,Profile Point,label,Point Label,string,Yes,No,,,,device_profile_points.metadata_json,Profile body,Editable,Text,Display label,app/api/models.py,VERIFIED
+Management,Profile Point,data_type,Data Type,enum,Yes,No,,number|string|boolean,,device_profile_points,Profile body,Editable,Select,Point type,app/api/models.py,VERIFIED
+Management,Profile Point,channel,Channel,enum,No,No,telemetry,telemetry|status,,device_profile_points,Profile body,Editable,Select,Point channel,app/api/models.py,VERIFIED
+Management,Profile Point,unit,Unit,string,No,Yes,,,,device_profile_points,Profile body,Editable,Text,Measurement unit,app/api/models.py,VERIFIED
+Management,Profile Point,min,Minimum,float,No,Yes,,,,device_profile_points.min_value,Profile body,Editable,Number,Minimum accepted number,app/api/models.py,VERIFIED
+Management,Profile Point,max,Maximum,float,No,Yes,,,,device_profile_points.max_value,Profile body,Editable,Number,Maximum accepted number,app/api/models.py,VERIFIED
+Management,Profile Point,allowed_values,Allowed Values,array,No,Yes,,,,device_profile_points,Profile body,Editable,Table,Allowed value set,app/api/models.py,VERIFIED
+Management,Profile Point,precision,Precision,int,No,Yes,,0..12,digits,device_profile_points.precision_digits,Profile body,Editable,Number,Decimal digits,app/api/models.py,VERIFIED
+Management,Profile Point,required,Required,boolean,No,No,false,,,device_profile_points,Profile body,Editable,Check,Required when quality is good,app/registry/sync.py,VERIFIED
+Management,Profile Event,code,Event Code,string,Yes,No,,,,device_profile_events.event_type,Profile body,Editable,Text,Event identifier,app/api/models.py,VERIFIED
+Management,Profile Event,label,Event Label,string,Yes,No,,,,not persisted,Profile body,Editable,Text,Profile event label is discarded by current sync,app/api/integration.py,VERIFIED
+Management,Device API,device_id,Device ID,string,Yes,No,,,,devices,PUT /api/v1/sync/devices/{device_id},Editable,Link,Global device key,app/api/models.py,VERIFIED
+Management,Device API,org_code,Organization Code,string,Yes,No,,,,devices,Device sync,Editable,Link,Tenant scope,app/api/models.py,VERIFIED
+Management,Device API,site_code,Site Code,string,Yes,No,,,,devices,Device sync,Editable,Link,Site scope,app/api/models.py,VERIFIED
+Management,Device API,zone_code,Zone Code,string,Yes,No,,,,devices,Device sync,Editable,Link,Zone scope,app/api/models.py,VERIFIED
+Management,Device API,profile_code,Profile Code,string,Yes,No,,,,devices,Device sync,Editable,Link,Profile relation,app/api/models.py,VERIFIED
+Management,Device API,status,Lifecycle Status,enum,Yes,No,,registered|active|maintenance|retired,,devices.metadata_json,Device sync,Editable,Select,Management lifecycle not connectivity,app/api/models.py,VERIFIED
+Management,Device API,connectivity_type,Connectivity Type,enum,Yes,No,,WIFI|LAN|4G|5G,,devices.connectivity,Device sync,Editable,Select,Network technology,app/api/models.py,VERIFIED
+Management,Device API,config_version,Config Version,int,Yes,No,,>=1,,devices,Device sync,Editable,Number,Monotonic version,app/api/models.py,VERIFIED
+Management,Device API,enabled,Enabled,boolean,No,No,true,,,devices,Device sync,Editable,Check,Enable device,app/api/models.py,VERIFIED
+Management,Device API,credential_ref,Credential Reference,string,No,Yes,,,,devices,Device sync,Editable,Text,Reference only; never secret value,app/api/models.py,VERIFIED
+Management,Rule API,rule_id,Rule ID,string,Yes,No,,,,rule_definitions.rule_code,PUT /api/v1/sync/rules/{rule_id},Editable,Text,Rule key,app/api/models.py,VERIFIED
+Management,Rule API,version,Config Version,int,Yes,No,,>=1,,rule_definitions,Rule sync,Editable,Number,Monotonic version,app/api/models.py,VERIFIED
+Management,Rule API,org_code,Organization Code,string,Yes,No,,,,rule_definitions,Rule sync,Editable,Link,Tenant scope,app/api/models.py,VERIFIED
+Management,Rule API,rule_type,Rule Type,enum,Yes,No,,THRESHOLD|STATE_CHANGE,,rule_definitions.rule_kind,Rule sync,Editable,Select,Rule discriminator,app/api/models.py,VERIFIED
+Management,Rule API,scope,Scope,object,Yes,No,,,,rule_definitions,Rule sync,Editable,Section,Type and reference,app/api/models.py,VERIFIED
+Management,Rule API,data_point,Data Point,string,Conditional,Yes,,,,rule_definitions.metric,Rule sync,Editable,Link,Required for threshold,app/api/models.py,VERIFIED
+Management,Rule API,operator,Operator,enum,No,Yes,,>|>=|<|<=|==|!=,,rule_definitions.config_json,Rule sync,Editable,Select,Accepted but runtime threshold code is high-threshold oriented,app/api/models.py,VERIFIED
+Management,Rule API,threshold,Threshold,float,Conditional,Yes,,,,rule_definitions.threshold_value,Rule sync,Editable,Number,Required for threshold,app/api/models.py,VERIFIED
+Management,Rule API,duration_s,Duration,int,No,No,0,>=0,s,rule_definitions.hold_seconds,Rule sync,Editable,Number,Threshold hold,app/api/models.py,VERIFIED
+Management,Rule API,hysteresis,Hysteresis,float,No,No,0,>=0,,rule_definitions.hysteresis_value,Rule sync,Editable,Number,Recovery offset,app/api/models.py,VERIFIED
+Management,Rule API,clear_duration_s,Clear Duration,int,No,No,0,>=0,s,rule_definitions.clear_hold_seconds,Rule sync,Editable,Number,Recovery hold,app/api/models.py,VERIFIED
+Management,Rule API,quiet_window_s,Quiet Window,int,No,No,0,>=0,s,rule_definitions.quiet_seconds,Rule sync,Editable,Number,Dedup quiet period,app/api/models.py,VERIFIED
+Management,Rule API,event_type,Event Type,string,Conditional,Yes,,,,rule_definitions.event_type,Rule sync,Editable,Select,Required for state change,app/api/models.py,VERIFIED
+Management,Rule API,open_limit_s,Open Limit,int,Conditional,Yes,,>=0,s,rule_definitions.hold_seconds,Rule sync,Editable,Number,Required for state change,app/api/models.py,VERIFIED
+Management,Rule API,schedule,Schedule,object,No,Yes,,,,rule_definitions,Rule sync,Editable,Section,Timezone weekdays and hours,app/api/models.py,VERIFIED
+Management,Rule API,outside_schedule_immediate,Outside Schedule Immediate,boolean,No,No,false,,,rule_definitions.config_json,Rule sync,Editable,Check,Configuration retained in JSON,app/api/models.py,VERIFIED
+Management,Rule API,severity,Severity,enum,No,No,High,Low|Medium|High|Critical,,rule_definitions.severity,Rule sync,Editable,Select,Maps to uppercase internal severity,app/registry/sync.py,VERIFIED
+Management,Rule API,auto_close,Auto Close,boolean,No,No,false,,,rule_definitions.config_json,Rule sync,Editable,Check,Retained configuration,app/api/models.py,VERIFIED
+Management,Rule API,active,Active,boolean,No,No,true,,,rule_definitions.enabled,Rule sync,Editable,Check,Enable rule,app/api/models.py,VERIFIED
+Device,MQTT Common,schema_version,Schema Version,string,Yes,No,,,,payload_json,MQTT,System Generated,Text,Message schema version,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Common,device_id,Device ID,string,Yes,No,,,,telemetry/device_events,MQTT,System Generated,Link,Publishing device,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Common,org_code,Organization Code,string,Yes,No,,,,payload_json,MQTT,System Generated,Link,Must match registry,app/ingestor.py,VERIFIED
+Device,MQTT Common,site_code,Site Code,string,Yes,No,,,,payload_json,MQTT,System Generated,Link,Must match registry,app/ingestor.py,VERIFIED
+Device,MQTT Common,profile,Profile,string,Yes,No,,,,payload_json,MQTT,System Generated,Link,Must match registry,app/ingestor.py,VERIFIED
+Device,MQTT Common,boot_id,Boot ID,string,Yes,No,,,,telemetry/device_events,MQTT,System Generated,Text,Boot/session identity,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Common,seq,Sequence,int,Yes,No,,>=0,,telemetry/device_events,MQTT,System Generated,Number,Per-boot sequence,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Common,ts,Device Timestamp,datetime,Yes,No,,,,measured_at/event_at,MQTT,System Generated,DateTime,Observation timestamp,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Common,ts_source,Timestamp Source,enum,Yes,No,,device|server,,telemetry,MQTT,System Generated,Badge,Timestamp provenance,db/migrations/001_schema.sql,VERIFIED
+Device,MQTT Telemetry,type,Message Type,enum,Yes,No,,telemetry,,payload_json,MQTT,System Generated,Badge,Envelope discriminator,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Telemetry,quality,Quality,enum,Yes,No,,good|error,,telemetry_reports,MQTT,System Generated,Badge,Report quality,db/migrations/006_quality_contract.sql,VERIFIED
+Device,MQTT Telemetry,data,Data,object,Yes,No,,,,payload_json,MQTT,System Generated,Object,Profile validated point map,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Event,event_id,Event ID,string,Yes,No,,,,device_events,MQTT,System Generated,Text,Device event identity,app/ingestion/contracts.py,VERIFIED
+Device,MQTT Event,event_type,Event Type,string,Yes,No,,,,device_events,MQTT,System Generated,Badge,DOOR_OPENED or DOOR_CLOSED for S6,app/ingestion/contracts.py,VERIFIED
+Device,Telemetry,metric,Metric,string,Yes,No,,,,telemetry,GET /devices/{id}/telemetry,Read Only,Select,Profile point code,db/migrations/001_schema.sql,VERIFIED
+Device,Telemetry,value_number,Value,float,Yes,No,,,,telemetry,GET /devices/{id}/telemetry,Read Only,Number,Numeric measurement,db/migrations/001_schema.sql,VERIFIED
+Device,Telemetry,measured_at,Measured At,datetime,Yes,No,,UTC,,telemetry,GET /devices/{id}/telemetry,Read Only,DateTime,Chart timestamp,db/migrations/001_schema.sql,VERIFIED
+Device,Telemetry,received_at,Received At,datetime,Yes,No,,UTC,,telemetry,None,Read Only,DateTime,Ingest receipt time,db/migrations/001_schema.sql,VERIFIED
+Device,Status,current_state,Connectivity Status,enum,Yes,No,,online|offline,,device_status,GET /devices/{id}/status,Read Only,Badge,Current connectivity,db/migrations/001_schema.sql,VERIFIED
+Device,Status,last_seen_at,Last Seen,datetime,No,Yes,,UTC,,device_status,GET /devices/{id}/status,Read Only,DateTime,Last valid traffic,db/migrations/007_status_tracker_timeout.sql,VERIFIED
+Device,Status,received_at,Status Updated At,datetime,Yes,No,,UTC,,device_status,GET /devices/{id}/status,Read Only,DateTime,Status projection update,db/migrations/001_schema.sql,VERIFIED
+Device,Status,timeout_seconds,Timeout,int,Yes,No,120,,s,device_status,GET /devices/{id}/status,Read Only,Number,Offline timeout,db/migrations/007_status_tracker_timeout.sql,VERIFIED
+Alarm,Occurrence,alarm_key,Internal Alarm Key,string,Yes,No,,,,alarm_occurrences,GET /api/v1/alarms,Read Only,Text,Unique occurrence transition key,db/migrations/002_rules.sql,VERIFIED
+Alarm,Occurrence,episode_key,Episode Key,string,No,Yes,,,,alarm_occurrences,GET /api/v1/alarms,Read Only,Text,Groups trigger and clear,db/migrations/003_m1_rule_engine.sql,VERIFIED
+Alarm,Occurrence,occurrence_kind,Occurrence Kind,enum,Yes,No,TRIGGERED,TRIGGERED|CLEARED,,alarm_occurrences,GET /api/v1/alarms,Read Only,Badge,Rule transition,db/migrations/003_m1_rule_engine.sql,VERIFIED
+Alarm,Occurrence,severity,Severity,enum,Yes,No,,INFO|WARNING|HIGH|CRITICAL,,alarm_occurrences,GET /api/v1/alarms,Read Only,Badge,Stored severity,db/migrations/002_rules.sql,VERIFIED
+Alarm,Occurrence,triggered_at,Triggered At,datetime,Yes,No,,UTC,,alarm_occurrences,GET /api/v1/alarms,Read Only,DateTime,Occurrence record time,db/migrations/002_rules.sql,VERIFIED
+Alarm,Occurrence,cleared_at,Cleared At,datetime,No,Yes,,UTC,,alarm_occurrences,GET /api/v1/alarms,Read Only,DateTime,Condition clear time,db/migrations/003_m1_rule_engine.sql,VERIFIED
+Alarm,Bridge Alarm,event_id,Delivery Event ID,string,Yes,No,,,,alarm_outbox,Bridge POST,System Generated,Text,Idempotency key,app/api/models.py,VERIFIED
+Alarm,Bridge Alarm,alarm_key,Public Alarm Key,string,Yes,No,,,,alarm_episode_mappings,Bridge POST,System Generated,Text,Stable episode key,app/api/models.py,VERIFIED
+Alarm,Bridge Alarm,kind,Transition Kind,enum,Yes,No,,occurrence|cleared,,payload_json,Bridge POST,System Generated,Badge,Bridge transition vocabulary,app/api/models.py,VERIFIED
+Alarm,Bridge Alarm,occurrence_seq,Occurrence Sequence,int,Yes,No,,>=1,,payload_json,Bridge POST,System Generated,Number,Sequence currently emitted as 1,app/api/models.py,VERIFIED
+Alarm,Bridge Alarm,raised_at,Raised At,datetime,Conditional,Yes,,UTC,,payload_json,Bridge POST,System Generated,DateTime,Required for occurrence,app/api/models.py,VERIFIED
+Alarm,Bridge Alarm,cleared_at,Cleared At,datetime,Conditional,Yes,,UTC,,payload_json,Bridge POST,System Generated,DateTime,Required for cleared,app/api/models.py,VERIFIED
+Alarm,Bridge Event,data.summary,Summary,string,Yes,No,,,,payload_json,Bridge POST,System Generated,Text,Maps to Alarm.summary,app/rules/engine.py,VERIFIED
+Alarm,Lifecycle,state,Workflow State,enum,Yes,No,,acknowledged|in_progress|closed,,alarm_lifecycle,POST /alarms/{alarm_key}/state,Editable,Badge,User workflow state,app/api/models.py,VERIFIED
+Alarm,Lifecycle,changed_at,Changed At,datetime,Yes,No,,UTC,,alarm_lifecycle,POST /alarms/{alarm_key}/state,Editable,DateTime,Workflow transition time,app/api/models.py,VERIFIED
+Alarm,Lifecycle,changed_by,Changed By,string,Yes,No,,,,alarm_lifecycle.actor_ref,POST /alarms/{alarm_key}/state,Editable,Link,Actor reference,app/api/models.py,VERIFIED
+Integration,Outbox,delivery_state,Delivery State,enum,Yes,No,PENDING,PENDING|IN_FLIGHT|DELIVERED|FAILED,,alarm_outbox,None,Read Only,Badge,Delivery lifecycle,db/migrations/004_durable_outbox.sql,VERIFIED
+Integration,Outbox,attempt_count,Attempt Count,int,Yes,No,0,>=0,,alarm_outbox,GET /api/v1/alarms,Read Only,Number,Send attempts,db/migrations/002_rules.sql,VERIFIED
+Integration,Outbox,failure_count,Failure Count,int,Yes,No,0,>=0,,alarm_outbox,GET /api/v1/outbox/metrics,Read Only,Number,Failed attempts,db/migrations/004_durable_outbox.sql,VERIFIED
+Integration,Outbox,ack_id,ACK ID,string,No,Yes,,,,alarm_outbox,GET /api/v1/alarms,Read Only,Text,Bridge acknowledgement,db/migrations/004_durable_outbox.sql,VERIFIED
+Integration,Outbox,delivered_at,Delivered At,datetime,No,Yes,,UTC,,alarm_outbox,GET /api/v1/alarms,Read Only,DateTime,Successful delivery time,db/migrations/002_rules.sql,VERIFIED
+Integration,Sync,payload_hash,Payload Hash,string,Yes,No,,SHA-256,,configuration tables,Sync APIs,System Generated,Text,Same-version idempotency digest,app/registry/sync.py,VERIFIED
+Integration,Snapshot,contract_version,Contract Version,string,Yes,No,,1.3-proposed,,snapshot JSON,GET /internal/snapshot,Read Only,Text,Snapshot contract discriminator,app/integrations/snapshot.py,VERIFIED
+Integration,Snapshot,resources,Resources,array,Yes,No,,,,snapshot JSON,GET /internal/snapshot,Read Only,Table,Ordered configuration wrappers,app/integrations/snapshot.py,VERIFIED
+UI,Dashboard,is_stale,Stale,boolean,No,No,,,,none,None,Read Only,Badge,Compute from last seen and timeout; do not persist,docs/integration/DEV1_DASHBOARD_UI_MAPPING.md,PROPOSED
+UI,Dashboard,active_alarm_count,Active Alarms,int,No,No,,,,none,None,Read Only,KPI,Requires agreed active semantics,docs/integration/DEV1_PENDING_CONFIRMATIONS.md,PROPOSED

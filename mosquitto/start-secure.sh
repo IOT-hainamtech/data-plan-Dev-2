@@ -20,6 +20,8 @@ fi
 if [ -n "${MQTT_TH002_PASSWORD:-}" ]; then
     mosquitto_passwd -b "$password_file" TH-002 "$MQTT_TH002_PASSWORD"
 fi
-chown mosquitto:mosquitto "$password_file"
-chmod 600 "$password_file"
+# Mosquitto 2 warns that a non-root-owned password file will be rejected by a future release.
+# The broker runs in group mosquitto, so root ownership with group-read is sufficient.
+chown root:mosquitto "$password_file"
+chmod 640 "$password_file"
 exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf

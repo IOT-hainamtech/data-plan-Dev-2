@@ -8,7 +8,9 @@ public:
     bool read(Sht31Reading& reading);
     static bool crc_valid(const uint8_t* data, uint8_t expected);
 private:
+    bool probe() const;
     uint8_t address_{0x44};
     float temperature_offset_{0};
     float humidity_offset_{0};
+    bool initialized_{false};
 };

@@ -1,4 +1,4 @@
-"""Read-only local Data API prototype; NO AUTH/TLS, bind only to localhost.
+"""Tenant-authenticated Data API; terminate TLS at the trusted LAN proxy if exposed.
 
 Not the finalized IF-01..IF-07 contract; do not expose to the internet.
 """
@@ -36,15 +36,18 @@ def health():
 
 
 @app.get("/api/v1/outbox/metrics")
-def outbox_metrics():
+def outbox_metrics(org_code: str = Depends(tenant_org)):
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT
-                count(*) FILTER (WHERE delivery_state IN ('PENDING','IN_FLIGHT')),
-                count(*) FILTER (WHERE delivery_state='FAILED'),
-                COALESCE(sum(failure_count),0),
-                min(created_at) FILTER (WHERE delivery_state IN ('PENDING','IN_FLIGHT'))
-                FROM alarm_outbox""")
+                count(*) FILTER (WHERE o.delivery_state IN ('PENDING','IN_FLIGHT')),
+                count(*) FILTER (WHERE o.delivery_state='FAILED'),
+                COALESCE(sum(o.failure_count),0),
+                min(o.created_at) FILTER (WHERE o.delivery_state IN ('PENDING','IN_FLIGHT'))
+                FROM alarm_outbox o
+                JOIN alarm_occurrences a ON a.alarm_key=o.alarm_key
+                JOIN devices d ON d.device_id=a.device_id
+                WHERE d.org_code=%s""", (org_code,))
             pending, failed, failures, oldest = cur.fetchone()
     age = max(0.0, (utc_now() - oldest).total_seconds()) if oldest else 0.0
     return {"pending": pending, "failed": failed, "delivery_failures": failures,

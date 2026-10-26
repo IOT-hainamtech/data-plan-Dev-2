@@ -5,6 +5,10 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#ifndef DEFAULT_SENSOR_TYPE
+#define DEFAULT_SENSOR_TYPE "sht31"
+#endif
+
 namespace {
 bool read_string(nvs_handle_t handle, const char* key, std::string& value) {
     size_t size = 0;
@@ -72,6 +76,12 @@ bool ConfigManager::validate(const AppConfig& c, std::string& error) {
     if ((c.sensor_type == SensorType::Sht31 && c.profile_code != "TEMP_HUM_SENSOR") ||
         (c.sensor_type == SensorType::ReedDoor && c.profile_code != "DOOR_SENSOR")) {
         error = "profile_code does not match sensor_type"; return false;
+    }
+    const bool environment_matches =
+        (std::string(DEFAULT_SENSOR_TYPE) == "sht31" && c.sensor_type == SensorType::Sht31) ||
+        (std::string(DEFAULT_SENSOR_TYPE) == "reed_door" && c.sensor_type == SensorType::ReedDoor);
+    if (!environment_matches) {
+        error = "NVS sensor_type does not match firmware environment"; return false;
     }
     if (c.telemetry_seconds == 0 || c.heartbeat_seconds == 0) { error = "interval must be positive"; return false; }
     if (c.sht31_address != 0x44 && c.sht31_address != 0x45) { error = "SHT31 address must be 0x44 or 0x45"; return false; }

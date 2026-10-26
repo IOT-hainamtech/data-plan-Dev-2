@@ -10,7 +10,7 @@ Base URL on the current Dev 2 host:
 http://192.168.1.87:8002/api/v1
 ```
 
-Except `/health` and `/outbox/metrics`, Dashboard and integration routes require:
+Except `/health`, Dashboard and integration routes—including `/outbox/metrics`—require:
 
 ```http
 Authorization: Bearer <DP_INBOUND_TOKEN>
@@ -32,7 +32,7 @@ The bearer value must be supplied privately. A missing/invalid token returns `40
 | GET | `/devices/{device_id}/status` | Online/offline state, last seen and status history | `history_limit` 1–100 |
 | GET | `/zones/{zone_code}/summary` | Device/online/offline totals for one site/zone | Required `site_code` |
 | GET | `/alarms` | Alarm occurrence/clear history and delivery state | `limit` 1–500, `offset` ≥ 0 |
-| GET | `/outbox/metrics` | Operational delivery backlog | No |
+| GET | `/outbox/metrics` | Organization-scoped operational delivery backlog | No |
 
 The actual source also exposes configuration synchronization routes (`PUT /sync/organizations/{org_code}`, `/sync/sites/{org_code}/{site_code}`, `/sync/zones/{org_code}/{site_code}/{zone_code}`, `/sync/profiles/{profile_code}`, `/sync/devices/{device_id}`, `/sync/rules/{rule_id}`) and `POST /alarms/{alarm_key}/state`. They are integration/write APIs, not Dashboard reads.
 

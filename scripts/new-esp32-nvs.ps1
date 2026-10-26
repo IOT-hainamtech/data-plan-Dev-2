@@ -3,6 +3,7 @@ param(
     [string]$WifiSsid,
     [SecureString]$WifiPassword,
     [SecureString]$MqttPassword,
+    [ValidatePattern('^[A-Za-z0-9.-]+$')][string]$MqttHost = '192.168.1.40',
     [switch]$UseExistingMqttSecret,
     [switch]$Force
 )
@@ -60,6 +61,7 @@ try {
     $content = $content.Replace('__WIFI_SSID__', (ConvertTo-CsvField $WifiSsid))
     $content = $content.Replace('__WIFI_PASSWORD__', (ConvertTo-CsvField $wifiPlain))
     $content = $content.Replace('__MQTT_PASSWORD__', (ConvertTo-CsvField $mqttPlain))
+    $content = $content -replace '(?m)^mqtt_uri,data,string,.*$', "mqtt_uri,data,string,mqtts://${MqttHost}:8883"
     [IO.File]::WriteAllText($csv, $content, [Text.UTF8Encoding]::new($false))
     Push-Location $firmware
     try { & $python $generator generate $csv $image 0x6000 }
