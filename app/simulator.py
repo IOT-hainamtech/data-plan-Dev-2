@@ -17,7 +17,7 @@ S6_DEVICE_ID = os.getenv("SIM_S6_DEVICE_ID", "DR-001")
 HOST = os.getenv("MQTT_HOST", "mqtt")
 PORT = int(os.getenv("MQTT_PORT", "8883"))
 CA_FILE = os.getenv("MQTT_CA_FILE", "/run/mqtt/ca.crt")
-INTERVAL = max(1, int(os.getenv("SIM_INTERVAL", "10")))  # Short demo interval; S1 spec is 30–60 s.
+INTERVAL = min(60, max(30, int(os.getenv("SIM_INTERVAL", "60"))))
 
 
 def timestamp():
@@ -27,7 +27,7 @@ def timestamp():
 class SimulatedDevice:
     def __init__(self, device_id):
         self.device_id = device_id
-        self.boot_id = uuid.uuid4().hex[:10]
+        self.boot_id = uuid.uuid4().hex[:8]
         self.seq = 0
         self.connected = threading.Event()
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
@@ -48,7 +48,7 @@ class SimulatedDevice:
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.status_topic = self.topic("status")
-        will_payload = self.message({}, state="offline", increment=False)
+        will_payload = self.message({}, state="offline", msg_kind="status", increment=False)
         self.client.will_set(self.status_topic, json.dumps(will_payload), qos=1, retain=True)
         self.client.connect_async(HOST, PORT, keepalive=45)
         self.client.loop_start()
@@ -60,7 +60,7 @@ class SimulatedDevice:
             print(f"SIM {self.device_id} connection rejected: {reason_code}", flush=True)
             return
         self.connected.set()
-        self.publish("status", self.message({}, state="online"), retain=True, wait=False)
+        self.publish("status", self.message({}, state="online", msg_kind="status"), retain=True, wait=False)
         print(f"SIM {self.device_id} connected with TLS", flush=True)
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
@@ -71,14 +71,17 @@ class SimulatedDevice:
     def topic(self, channel):
         return f"nw/v1/{ORG}/{SITE}/{self.device_id}/{channel}"
 
-    def message(self, data, state=None, event_type=None, increment=True):
+    def message(self, data, state=None, event_type=None, msg_kind=None, increment=True):
         if increment:
             self.seq += 1
         payload = {
             "schema_version": 1, "device_id": self.device_id,
-            "boot_id": self.boot_id, "ts": timestamp(), "seq": self.seq,
+            "boot_id": self.boot_id, "ts": timestamp(), "ts_source": "device",
+            "seq": self.seq,
             "data": data,
         }
+        if msg_kind:
+            payload["msg_kind"] = msg_kind
         if state:
             payload["state"] = state
         if event_type:
@@ -106,25 +109,28 @@ def main():
         while True:
             temperature = round(random.uniform(25.0, 33.0), 1)
             humidity = round(random.uniform(45.0, 70.0), 1)
-            telemetry = s1.message({"temperature": temperature, "humidity": humidity})
+            telemetry = s1.message({"temperature": temperature, "humidity": humidity},
+                                   msg_kind="measurement")
             telemetry["quality"] = "good"
             s1.publish("telemetry", telemetry)
             if tick % 4 == 0:
                 door_open = not door_open
                 state = "open" if door_open else "closed"
                 event_type = "DOOR_OPENED" if door_open else "DOOR_CLOSED"
-                s6.publish("event", s6.message({"door_state": state}, event_type=event_type))
+                s6.publish("event", s6.message({"door_state": state}, event_type=event_type,
+                                               msg_kind="event"))
             if tick > 0 and tick * INTERVAL % 60 == 0:
-                s1.publish("status", s1.message({}, state="online"), retain=True)
                 state = "open" if door_open else "closed"
-                s6.publish("status", s6.message({"door_state": state}, state="online"), retain=True)
+                heartbeat = s6.message({"door_state": state}, msg_kind="heartbeat")
+                heartbeat["quality"] = "good"
+                s6.publish("telemetry", heartbeat)
             tick += 1
             time.sleep(INTERVAL)
     except KeyboardInterrupt:
         pass
     finally:
         for device in (s1, s6):
-            device.publish("status", device.message({}, state="offline"), retain=True)
+            device.publish("status", device.message({}, state="offline", msg_kind="status"), retain=True)
             device.client.disconnect()
             device.client.loop_stop()
 
