@@ -1,0 +1,67 @@
+# Staging Docker Compose environment for NW-LOCAL-ORG-001 integration.
+# Fully isolated from the production/demo runtime: separate project name, database, volume, network, and ports.
+name: nextwireless-dev2-staging
+
+x-app-build: &app-build
+  context: .
+  dockerfile: app/Dockerfile
+
+networks:
+  staging_net:
+    driver: bridge
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.30.2-pg17
+    restart: unless-stopped
+    networks:
+      - staging_net
+    environment:
+      POSTGRES_DB: nextwireless_staging
+      POSTGRES_USER: nw_staging_user
+      POSTGRES_PASSWORD: ${STAGING_PG_PASSWORD:?Set STAGING_PG_PASSWORD in .secrets/staging.env}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${STAGING_PG_PORT:-5434}:5432"
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nw_staging_user -d nextwireless_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  data-api:
+    build: *app-build
+    restart: unless-stopped
+    networks:
+      - staging_net
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: nextwireless_staging
+      DB_USER: nw_staging_user
+      DB_PASSWORD: ${STAGING_PG_PASSWORD:?Set STAGING_PG_PASSWORD in .secrets/staging.env}
+      DP_INBOUND_TOKEN: ${STAGING_DP_INBOUND_TOKEN:?Set STAGING_DP_INBOUND_TOKEN in .secrets/staging.env}
+      DP_INBOUND_ALLOWED_ORGS: ${STAGING_ALLOWED_ORGS:-NW-LOCAL-ORG-001}
+      STAGING_SEED_PATH: /db/staging_seed/099_staging_seed.sql
+    ports:
+      - "127.0.0.1:${STAGING_DATA_API_PORT:-8003}:8000"
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./db/staging_seed:/db/staging_seed:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  postgres_staging_data:

@@ -1,0 +1,83 @@
+{
+  "device_id": "NW-IT-DR001",
+  "config": {
+    "device": {
+      "device_id": "NW-IT-DR001",
+      "site": "NW-LOCAL-SITE-001",
+      "zone": null,
+      "status": "Active",
+      "connectivity_type": "WIFI",
+      "config_version": 1
+    },
+    "site": {"organization": "NW-LOCAL-ORG-001"},
+    "profile": {
+      "profile_code": "NW-IT-S6",
+      "version": 1,
+      "supports_telemetry": true,
+      "data_points": [{"code": "door_state", "data_type": "string", "allowed_values": ["open", "closed"], "required": true}],
+      "event_types": [
+        {"event_type_code": "DOOR_OPENED", "state_point": "door_state", "state_value": "open"},
+        {"event_type_code": "DOOR_CLOSED", "state_point": "door_state", "state_value": "closed"}
+      ]
+    },
+    "rules": [{
+      "rule_id": "NW-IT-RULE-S6",
+      "version": 1,
+      "rule_type": "STATE_CHANGE",
+      "scope_type": "Device",
+      "scope_ref": "NW-IT-DR001",
+      "event_type": "DOOR_OPENED",
+      "open_limit_s": 300,
+      "schedule": {
+        "business_start": "08:00:00",
+        "business_end": "18:00:00",
+        "timezone": "Asia/Ho_Chi_Minh"
+      },
+      "business_start": "08:00:00",
+      "business_end": "18:00:00",
+      "schedule_timezone": "Asia/Ho_Chi_Minh",
+      "active": true
+    }]
+  },
+  "status": {
+    "event_id": "00000000-0000-4000-8000-000000000201",
+    "org_code": "NW-LOCAL-ORG-001",
+    "device_id": "NW-IT-DR001",
+    "state": "online",
+    "since": "2026-10-30T03:00:00.000Z",
+    "last_seen": "2026-10-30T03:00:00.000Z",
+    "reason": "connect"
+  },
+  "alarm_occurrence": {
+    "event_id": "00000000-0000-4000-8000-000000000211",
+    "org_code": "NW-LOCAL-ORG-001",
+    "alarm_key": "NW-IT-RULE-S6:NW-IT-DR001:1793329200",
+    "episode_key": "NW-IT-RULE-S6:NW-IT-DR001:1793329200",
+    "kind": "occurrence",
+    "rule_id": "NW-IT-RULE-S6",
+    "rule_version": 1,
+    "device_id": "NW-IT-DR001",
+    "zone_code": null,
+    "severity": "High",
+    "episode_start": "2026-10-30T03:00:00.000Z",
+    "occurrence_seq": 1,
+    "raised_at": "2026-10-30T03:00:00.000Z",
+    "event": {"event_id": "s6-source-1", "event_type": "DOOR_OPENED", "ts": "2026-10-30T03:00:00.000Z", "data": {"door_state": "open"}}
+  },
+  "alarm_cleared": {
+    "event_id": "00000000-0000-4000-8000-000000000212",
+    "org_code": "NW-LOCAL-ORG-001",
+    "alarm_key": "NW-IT-RULE-S6:NW-IT-DR001:1793329200",
+    "episode_key": "NW-IT-RULE-S6:NW-IT-DR001:1793329200",
+    "kind": "cleared",
+    "rule_id": "NW-IT-RULE-S6",
+    "rule_version": 1,
+    "device_id": "NW-IT-DR001",
+    "zone_code": null,
+    "severity": "High",
+    "episode_start": "2026-10-30T03:00:00.000Z",
+    "occurrence_seq": 2,
+    "cleared_at": "2026-10-30T03:05:00.000Z",
+    "event": {"event_id": "s6-source-2", "event_type": "DOOR_CLOSED", "ts": "2026-10-30T03:05:00.000Z", "data": {"door_state": "closed"}}
+  }
+}

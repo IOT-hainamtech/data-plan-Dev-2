@@ -1,0 +1,76 @@
+{
+  "device_id": "NW-IT-TH001",
+  "config": {
+    "device": {
+      "device_id": "NW-IT-TH001",
+      "site": "NW-LOCAL-SITE-001",
+      "zone": null,
+      "status": "Active",
+      "connectivity_type": "WIFI",
+      "config_version": 1
+    },
+    "site": {"organization": "NW-LOCAL-ORG-001"},
+    "profile": {
+      "profile_code": "NW-IT-S1",
+      "version": 1,
+      "supports_telemetry": true,
+      "data_points": [
+        {"code": "temperature", "data_type": "number", "unit": "Cel", "required": true},
+        {"code": "humidity", "data_type": "number", "unit": "%RH", "required": true}
+      ],
+      "event_types": []
+    },
+    "rules": [{
+      "rule_id": "NW-IT-RULE-S1",
+      "version": 1,
+      "rule_type": "THRESHOLD",
+      "scope_type": "Device",
+      "scope_ref": "NW-IT-TH001",
+      "data_point": "temperature",
+      "operator": ">",
+      "threshold": 30.0,
+      "active": true
+    }]
+  },
+  "status": {
+    "event_id": "00000000-0000-4000-8000-000000000101",
+    "org_code": "NW-LOCAL-ORG-001",
+    "device_id": "NW-IT-TH001",
+    "state": "online",
+    "since": "2026-10-30T03:00:00.000Z",
+    "last_seen": "2026-10-30T03:00:00.000Z",
+    "reason": "telemetry"
+  },
+  "alarm_occurrence": {
+    "event_id": "00000000-0000-4000-8000-000000000111",
+    "org_code": "NW-LOCAL-ORG-001",
+    "alarm_key": "NW-IT-RULE-S1:NW-IT-TH001:1793329200",
+    "episode_key": "NW-IT-RULE-S1:NW-IT-TH001:1793329200",
+    "kind": "occurrence",
+    "rule_id": "NW-IT-RULE-S1",
+    "rule_version": 1,
+    "device_id": "NW-IT-TH001",
+    "zone_code": null,
+    "severity": "High",
+    "episode_start": "2026-10-30T03:00:00.000Z",
+    "occurrence_seq": 1,
+    "raised_at": "2026-10-30T03:00:00.000Z",
+    "event": {"event_id": "s1-source-1", "event_type": "TEMPERATURE_HIGH", "ts": "2026-10-30T03:00:00.000Z", "data": {"temperature": 31.0}}
+  },
+  "alarm_cleared": {
+    "event_id": "00000000-0000-4000-8000-000000000112",
+    "org_code": "NW-LOCAL-ORG-001",
+    "alarm_key": "NW-IT-RULE-S1:NW-IT-TH001:1793329200",
+    "episode_key": "NW-IT-RULE-S1:NW-IT-TH001:1793329200",
+    "kind": "cleared",
+    "rule_id": "NW-IT-RULE-S1",
+    "rule_version": 1,
+    "device_id": "NW-IT-TH001",
+    "zone_code": null,
+    "severity": "High",
+    "episode_start": "2026-10-30T03:00:00.000Z",
+    "occurrence_seq": 2,
+    "cleared_at": "2026-10-30T03:05:00.000Z",
+    "event": {"event_id": "s1-source-2", "event_type": "TEMPERATURE_NORMAL", "ts": "2026-10-30T03:05:00.000Z", "data": {"temperature": 28.0}}
+  }
+}
