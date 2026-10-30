@@ -56,6 +56,11 @@ bool ConfigManager::load(AppConfig& c, std::string& error) const {
     nvs_get_u8(h, "sht31_address", &address);
     nvs_get_u8(h, "door_closed_lvl", &closed);
     nvs_get_u32(h, "door_debounce", &c.door_debounce_ms);
+    nvs_get_u32(h, "mqtt_keepalive", &c.mqtt_keepalive_seconds);
+    // Optional for backward-compatible NVS migration; two safe defaults remain
+    // when older partitions do not contain these keys.
+    read_string(h, "ntp_server_1", c.ntp_server_1);
+    read_string(h, "ntp_server_2", c.ntp_server_2);
     if (read_string(h, "temp_offset", temp_offset)) c.temperature_offset = std::strtof(temp_offset.c_str(), nullptr);
     if (read_string(h, "humidity_offset", humidity_offset)) c.humidity_offset = std::strtof(humidity_offset.c_str(), nullptr);
     nvs_close(h);
@@ -83,7 +88,19 @@ bool ConfigManager::validate(const AppConfig& c, std::string& error) {
     if (!environment_matches) {
         error = "NVS sensor_type does not match firmware environment"; return false;
     }
-    if (c.telemetry_seconds == 0 || c.heartbeat_seconds == 0) { error = "interval must be positive"; return false; }
+    if (c.telemetry_seconds < 30 || c.telemetry_seconds > 60) {
+        error = "telemetry interval must be within 30..60 seconds"; return false;
+    }
+    if (c.heartbeat_seconds < 30 || c.heartbeat_seconds > 120) {
+        error = "heartbeat interval must be within 30..120 seconds"; return false;
+    }
+    if (c.mqtt_keepalive_seconds < 15 || c.mqtt_keepalive_seconds > 60) {
+        error = "MQTT keepalive must be within 15..60 seconds"; return false;
+    }
+    if (c.ntp_server_1.empty() || c.ntp_server_2.empty() ||
+        c.ntp_server_1 == c.ntp_server_2) {
+        error = "two distinct NTP servers are required"; return false;
+    }
     if (c.sht31_address != 0x44 && c.sht31_address != 0x45) { error = "SHT31 address must be 0x44 or 0x45"; return false; }
     if (c.door_closed_level != 0 && c.door_closed_level != 1) { error = "door_closed_level must be 0 or 1"; return false; }
     if (c.door_debounce_ms < 10 || c.door_debounce_ms > 2000) { error = "door debounce out of range"; return false; }

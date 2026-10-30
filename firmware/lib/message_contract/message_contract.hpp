@@ -12,6 +12,11 @@ inline bool valid_code(const std::string& value) {
 inline bool valid_channel(const std::string& channel) {
     return channel == "telemetry" || channel == "event" || channel == "status";
 }
+inline bool valid_boot_id(const std::string& value) {
+    if (value.size() < 6 || value.size() > 8) return false;
+    for (unsigned char c : value) if (!std::isxdigit(c)) return false;
+    return true;
+}
 inline std::string topic(const std::string& org, const std::string& site,
                          const std::string& device, const std::string& channel) {
     if (!valid_code(org) || !valid_code(site) || !valid_code(device) || !valid_channel(channel)) return {};
@@ -28,12 +33,17 @@ public:
         for (auto& slot : slots_) if (!slot.used) { slot = {true, message_id, seq}; return true; }
         return false;
     }
-    bool acknowledge(int message_id) {
-        for (auto& slot : slots_) if (slot.used && slot.message_id == message_id) { slot.used = false; return true; }
+    bool acknowledge(int message_id, uint64_t* seq = nullptr) {
+        for (auto& slot : slots_) if (slot.used && slot.message_id == message_id) {
+            if (seq) *seq = slot.seq;
+            slot.used = false;
+            return true;
+        }
         return false;
     }
     size_t size() const { size_t n = 0; for (const auto& slot : slots_) n += slot.used; return n; }
     bool full() const { return size() == Capacity; }
+    void clear() { for (auto& slot : slots_) slot = {}; }
 private:
     struct Slot { bool used{false}; int message_id{-1}; uint64_t seq{0}; };
     Slot slots_[Capacity]{};

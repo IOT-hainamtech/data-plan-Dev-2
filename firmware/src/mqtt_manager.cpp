@@ -45,11 +45,28 @@ void MqttManager::event_thunk(void* args, esp_event_base_t, int32_t, void* data)
 void MqttManager::handle(esp_mqtt_event_handle_t event) {
     if (event->event_id == MQTT_EVENT_CONNECTED) {
         connected_ = true; ++connection_generation_; reconnect_delay_ms_ = 1000;
+        ESP_LOGI("mqtt", "MQTT_CONNECTED");
     } else if (event->event_id == MQTT_EVENT_DISCONNECTED) {
         connected_ = false;
+        xSemaphoreTake(lock_, portMAX_DELAY);
+        // esp-mqtt owns the QoS 1 outbox and retransmits unacknowledged packets
+        // after reconnect. Keep our msg_id/seq tracker until MQTT_EVENT_PUBLISHED;
+        // clearing it here would lose PUBACK accountability and allow >3 logical
+        // in-flight messages after reconnect.
+        const size_t pending = inflight_.size();
+        xSemaphoreGive(lock_);
+        ESP_LOGW("mqtt", "MQTT_DISCONNECTED; retained_inflight=%u reconnect scheduled",
+                 static_cast<unsigned>(pending));
         if (!reconnect_task_running_) { reconnect_task_running_ = true; xTaskCreate(reconnect_task, "mqtt_reconnect", 3072, this, 5, nullptr); }
     } else if (event->event_id == MQTT_EVENT_PUBLISHED) {
-        xSemaphoreTake(lock_, portMAX_DELAY); inflight_.acknowledge(event->msg_id); xSemaphoreGive(lock_);
+        uint64_t seq = 0;
+        xSemaphoreTake(lock_, portMAX_DELAY);
+        bool acknowledged = inflight_.acknowledge(event->msg_id, &seq);
+        xSemaphoreGive(lock_);
+        if (acknowledged) {
+            ESP_LOGI("mqtt", "PUBLISH_ACK seq=%llu msg_id=%d",
+                     static_cast<unsigned long long>(seq), event->msg_id);
+        }
     }
 }
 void MqttManager::reconnect_task(void* args) {

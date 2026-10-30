@@ -21,6 +21,11 @@ against the authoritative URD before production use.
 - `ReedDoorDriver`: GPIO27 `INPUT_PULLUP`, configurable closed level and debounce.
 - `main.cpp`: telemetry/event/heartbeat scheduler and task watchdog.
 
+Both builds use monotonic deadlines and NVS-configured intervals in the URD
+range 30–60 seconds (default 60). SHT31 publishes measurement telemetry;
+MC-38 publishes transition events immediately and a door-state heartbeat on
+the telemetry channel at its configured interval.
+
 The ESP-MQTT outbox retransmits unacknowledged QoS-1 packets after reconnect.
 Application payloads waiting for a free inflight slot retain their original
 payload, `seq` and `event_id`; retry does not allocate a new sequence number.
