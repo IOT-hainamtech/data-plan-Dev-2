@@ -5,6 +5,7 @@ import os
 import ssl
 import threading
 import time
+from collections import defaultdict
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -14,7 +15,7 @@ import paho.mqtt.client as mqtt
 from core.clock import now_utc
 from core.database import db_connection
 from ingestion.contracts import (door_heartbeat_event, parse_timestamp,
-                                 require_int, validate_message,
+                                 require_int, validate_door_heartbeat, validate_message,
                                  validate_telemetry_data)
 from registry import load_device_profile, load_profile_contract, load_profile_event_types
 from rules.engine import evaluate_due_rules, on_event, on_telemetry
@@ -22,11 +23,51 @@ from status import reconcile_device_timeouts, update_device_presence
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger("data-plane")
+MAX_MQTT_PAYLOAD_BYTES = int(os.getenv("MQTT_MAX_PAYLOAD_BYTES", "512"))
+
+
+class DeviceRateLimiter:
+    """Token bucket: burst five messages, sustained refill one message/second."""
+    def __init__(self):
+        self._state = defaultdict(lambda: [5.0, time.monotonic()])
+        self._lock = threading.Lock()
+
+    def allow(self, device_id):
+        now = time.monotonic()
+        with self._lock:
+            state = self._state[device_id]
+            state[0] = min(5.0, state[0] + now - state[1]); state[1] = now
+            if state[0] < 1.0:
+                return False
+            state[0] -= 1.0
+            return True
+
+
+RATE_LIMITER = DeviceRateLimiter()
+
+
+def record_ingestion_metric(org, name, *, error_code="", latency_ms=0.0):
+    """Best-effort durable counters; metric failure must never stop ingestion."""
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO ingestion_metrics
+                    (org_code,metric_name,error_code,metric_value,latency_sum_ms,updated_at)
+                    VALUES(%s,%s,%s,1,%s,%s)
+                    ON CONFLICT(org_code,metric_name,error_code) DO UPDATE SET
+                    metric_value=ingestion_metrics.metric_value+1,
+                    latency_sum_ms=ingestion_metrics.latency_sum_ms+EXCLUDED.latency_sum_ms,
+                    updated_at=EXCLUDED.updated_at""",
+                    (org or "unknown", name, error_code, latency_ms, now_utc()))
+            conn.commit()
+    except Exception:
+        LOG.exception("Unable to update ingestion metric %s", name)
 
 
 def save_message(topic, body):
     org, site, device, channel, stamp, source = validate_message(topic, body)
     received = now_utc()
+    ts_suspect = body.get("ts") is None or abs((received - stamp).total_seconds()) > 300
     conn = db_connection()
     try:
         cur = conn.cursor()
@@ -38,25 +79,45 @@ def save_message(topic, body):
             point_definitions = load_profile_contract(cur, profile, "telemetry")
             if not point_definitions:
                 raise ValueError("telemetry not supported by device profile")
+            if body.get("msg_kind") == "heartbeat":
+                door_state = validate_door_heartbeat(body, point_definitions)
+                cur.execute("""INSERT INTO device_state_snapshots
+                    (device_id,boot_id,seq,measured_at,received_at,ts_source,ts_suspect,state_json,payload_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (device_id,boot_id,seq) DO NOTHING""",
+                    (device,body["boot_id"],body["seq"],stamp,received,source,ts_suspect,
+                     Jsonb({"door_state":door_state}),Jsonb(body)))
+                inserted=cur.rowcount
+                if inserted:
+                    update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
+                    event_types=load_profile_event_types(cur,profile,"door_state")
+                    heartbeat_id,heartbeat_type=door_heartbeat_event(profile,body,event_types)
+                    if not ts_suspect:
+                        on_event(cur,device_id=device,event_id=heartbeat_id,event_type=heartbeat_type,
+                                 received_at=received,payload=body,observed_at=stamp)
+                conn.commit()
+                LOG.info("SAVED heartbeat device=%s inserted=%d",device,inserted)
+                return inserted
             quality, metrics = validate_telemetry_data(body, point_definitions)
             cur.execute("""INSERT INTO telemetry_reports
-                (device_id,boot_id,seq,quality,measured_at,received_at,payload_json)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                (device_id,boot_id,seq,quality,measured_at,received_at,ts_source,ts_suspect,payload_json)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (device_id,boot_id,seq) DO NOTHING""",
-                (device, body["boot_id"], body["seq"], quality, stamp, received, Jsonb(body)))
+                (device, body["boot_id"], body["seq"], quality, stamp, received, source,
+                 ts_suspect, Jsonb(body)))
             if not cur.rowcount:
                 conn.commit()
-                return
+                return 0
             inserted = 1
             update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
             for metric, value in metrics.items():
                 cur.execute("""INSERT INTO telemetry
-                    (device_id, boot_id, seq, metric, value_number, measured_at, received_at, ts_source)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (device_id, metric, measured_at) DO NOTHING""",
-                    (device, body["boot_id"], body["seq"], metric, value, stamp, received, source))
+                    (device_id, boot_id, seq, metric, value_number, measured_at, received_at, ts_source,ts_suspect)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (device_id, metric, measured_at) DO NOTHING""",
+                    (device, body["boot_id"], body["seq"], metric, value, stamp, received, source,ts_suspect))
                 new_count = cur.rowcount
                 inserted += new_count
-                if new_count:
+                if new_count and quality == "good" and not ts_suspect:
                     on_telemetry(cur, device_id=device, metric=metric, value=float(value),
                                  measured_at=stamp, received_at=received)
         elif channel == "event":
@@ -70,16 +131,17 @@ def save_message(topic, body):
             if state_point and body["data"].get(state_point) != state_value:
                 raise ValueError("invalid door event")
             cur.execute("""INSERT INTO device_events
-                (device_id,event_id,event_type,boot_id,seq,event_at,received_at,payload_json)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (device_id, event_id) DO NOTHING""",
+            (device_id,event_id,event_type,boot_id,seq,event_at,received_at,ts_source,ts_suspect,event_source,payload_json)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'device',%s) ON CONFLICT (device_id, event_id) DO NOTHING""",
                 (device, body["event_id"], event_type, body["boot_id"], body["seq"], stamp,
-                 received, Jsonb(body)))
+                 received, source, ts_suspect, Jsonb(body)))
             inserted = cur.rowcount
             if inserted:
                 update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
-                on_event(cur, device_id=device, event_id=body["event_id"],
-                         event_type=event_type, received_at=received, payload=body,
-                         observed_at=stamp)
+                if not ts_suspect:
+                    on_event(cur, device_id=device, event_id=body["event_id"],
+                             event_type=event_type, received_at=received, payload=body,
+                             observed_at=stamp)
         else:
             state = body["state"]
             inserted = update_device_presence(cur, device_id=device, boot_id=body["boot_id"],
@@ -88,12 +150,20 @@ def save_message(topic, body):
             event_types = load_profile_event_types(cur, profile, "door_state")
             heartbeat = door_heartbeat_event(profile, body, event_types) if "door_state" in points else None
             if heartbeat:
+                cur.execute("""INSERT INTO device_state_snapshots
+                    (device_id,boot_id,seq,measured_at,received_at,ts_source,ts_suspect,state_json,payload_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (device_id,boot_id,seq) DO NOTHING""",
+                    (device, body["boot_id"], body["seq"], stamp, received, source,ts_suspect,
+                     Jsonb({"door_state": body["data"]["door_state"]}), Jsonb(body)))
                 heartbeat_id, heartbeat_type = heartbeat
-                on_event(cur, device_id=device, event_id=heartbeat_id,
-                         event_type=heartbeat_type, received_at=received, payload=body,
-                         observed_at=stamp)
+                if not ts_suspect:
+                    on_event(cur, device_id=device, event_id=heartbeat_id,
+                             event_type=heartbeat_type, received_at=received, payload=body,
+                             observed_at=stamp)
         conn.commit()
         LOG.info("SAVED %s device=%s inserted=%d", channel, device, inserted)
+        return inserted
     except Exception:
         conn.rollback()
         raise
@@ -133,10 +203,25 @@ def configure_mqtt_security(client):
 
 
 def on_message(client, userdata, message):
+    started = time.monotonic()
+    org = "unknown"
     try:
+        if len(message.payload) > MAX_MQTT_PAYLOAD_BYTES:
+            raise ValueError("E-SIZE payload exceeds 512 bytes")
+        parts = message.topic.split("/")
+        if len(parts) == 6:
+            org = parts[2]
+        record_ingestion_metric(org, "received")
+        if len(parts) == 6 and not RATE_LIMITER.allow(parts[4]):
+            raise ValueError("E-RATE device message rate exceeded")
         body = json.loads(message.payload.decode("utf-8"))
-        save_message(message.topic, body)
+        inserted = save_message(message.topic, body)
+        latency = (time.monotonic() - started) * 1000.0
+        record_ingestion_metric(org, "duplicate" if inserted == 0 else "valid", latency_ms=latency)
     except (ValueError, KeyError, TypeError, psycopg.Error) as exc:
+        code = str(exc).split(" ", 1)[0][:48]
+        record_ingestion_metric(org, "rejected", error_code=code,
+                                latency_ms=(time.monotonic() - started) * 1000.0)
         LOG.warning("REJECTED topic=%s reason=%s", message.topic, exc)
     except Exception:
         LOG.exception("Unexpected processing failure topic=%s", message.topic)

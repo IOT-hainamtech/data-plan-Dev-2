@@ -174,5 +174,5 @@ class BridgeStatusIn(ContractModel):
     state: Literal["online", "offline"]
     since: datetime
     last_seen: datetime | None = None
-    reason: Literal["telemetry", "lwt", "timeout"]
+    reason: Literal["connect", "telemetry", "lwt", "timeout"]
     fw_version: str | None = None

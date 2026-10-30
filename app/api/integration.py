@@ -4,6 +4,7 @@ from api.models import (AlarmStateIn, DeviceIn, OrganizationIn, ProfileIn,
                         RuleIn, SiteIn, ZoneIn)
 from core.auth import authorize_org, service_context
 from core.database import db_connection
+from integrations.dev1_config import resolve_internal_alarm_key
 from registry.sync import (apply_device, apply_organization, apply_profile,
                            apply_rule, apply_site, apply_zone, payload_hash)
 
@@ -81,10 +82,16 @@ def alarm_state(alarm_key:str,body:AlarmStateIn,org:str=Depends(service_context)
     authorize_org(org,body.org_code); ranks={"acknowledged":1,"in_progress":2,"closed":3}; digest=payload_hash(body.model_dump(mode="json"))
     with db_connection() as conn:
         with conn.cursor() as cur:
+            try:
+                internal_alarm_key=resolve_internal_alarm_key(cur,alarm_key)
+            except LookupError:
+                raise HTTPException(404,"Alarm not found")
+            except ValueError:
+                raise HTTPException(409,"Alarm key mapping is ambiguous")
             cur.execute("""SELECT d.org_code FROM alarm_episode_mappings m JOIN devices d ON d.device_id=m.device_id
-                WHERE m.wire_alarm_key=%s""",(alarm_key,)); row=cur.fetchone()
+                WHERE m.wire_alarm_key=%s""",(internal_alarm_key,)); row=cur.fetchone()
             if not row: raise HTTPException(404,"Alarm not found")
-            authorize_org(org,row[0]); cur.execute("SELECT state_rank,version,payload_hash FROM alarm_lifecycle WHERE wire_alarm_key=%s FOR UPDATE",(alarm_key,)); old=cur.fetchone()
+            authorize_org(org,row[0]); cur.execute("SELECT state_rank,version,payload_hash FROM alarm_lifecycle WHERE wire_alarm_key=%s FOR UPDATE",(internal_alarm_key,)); old=cur.fetchone()
             if old:
                 if body.version<old[1]: raise HTTPException(409,{"code":"STALE_VERSION","applied_version":old[1]})
                 if body.version==old[1]:
@@ -95,6 +102,6 @@ def alarm_state(alarm_key:str,body:AlarmStateIn,org:str=Depends(service_context)
               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(wire_alarm_key) DO UPDATE SET state=EXCLUDED.state,
               state_rank=EXCLUDED.state_rank,version=EXCLUDED.version,payload_hash=EXCLUDED.payload_hash,
               actor_ref=EXCLUDED.actor_ref,note=EXCLUDED.note,updated_at=EXCLUDED.updated_at""",
-              (alarm_key,body.org_code,body.state,ranks[body.state],body.version,digest,body.changed_by,None,body.changed_at))
+              (internal_alarm_key,body.org_code,body.state,ranks[body.state],body.version,digest,body.changed_by,None,body.changed_at))
         conn.commit()
     return {"status":"applied","resource_id":alarm_key,"applied_version":body.version,"duplicate":False}

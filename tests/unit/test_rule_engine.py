@@ -2,8 +2,46 @@
 import unittest
 from datetime import datetime, time, timedelta
 
-from rules.engine import (_alarm_key, door_should_fire, is_business_hours,
-                          threshold_transition)
+from rules.engine import (_alarm_key, _manually_closed_uncleared_episode, _write_occurrence, door_should_fire,
+                           is_business_hours, threshold_transition)
+
+
+class OccurrenceCursor:
+    """Small transaction-local cursor double; no runtime database is used."""
+    def __init__(self, mapping=None, occurrence_count=0, rule_version=3):
+        self.mapping = mapping
+        self.occurrence_count = occurrence_count
+        self.rule_version = rule_version
+        self.rowcount = 0
+        self.result = None
+        self.occurrence_payload = None
+        self.outbox_payload = None
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(sql.split())
+        self.rowcount = 0
+        if normalized.startswith("INSERT INTO alarm_episode_mappings"):
+            if self.mapping is None:
+                self.mapping = (params[1], params[2])
+            self.rowcount = 1
+        elif normalized.startswith("SELECT wire_alarm_key"):
+            self.result = self.mapping
+        elif normalized.startswith("SELECT count(*) FROM alarm_occurrences"):
+            self.result = (self.occurrence_count,)
+        elif normalized.startswith("SELECT d.org_code"):
+            self.result = ("org", "zone", self.rule_version)
+        elif normalized.startswith("INSERT INTO alarm_occurrences"):
+            self.occurrence_payload = getattr(params[-1], "obj", params[-1])
+            self.rowcount = 1
+            self.occurrence_count += 1
+        elif normalized.startswith("INSERT INTO alarm_outbox"):
+            self.outbox_payload = getattr(params[1], "obj", params[1])
+            self.rowcount = 1
+        else:
+            raise AssertionError(f"unexpected SQL: {normalized}")
+
+    def fetchone(self):
+        return self.result
 
 
 class ThresholdTests(unittest.TestCase):
@@ -101,6 +139,82 @@ class DoorTests(unittest.TestCase):
         # Saturday 00:00:00 local = Friday 17:00:00 UTC
         sat_midnight = datetime(2026, 10, 16, 17, 0, 0)
         self.assertFalse(is_business_hours(sat_midnight, self.start, self.end, "Asia/Ho_Chi_Minh"))
+
+
+class AlarmContractTests(unittest.TestCase):
+    def setUp(self):
+        self.triggered = datetime(2026, 10, 29, 9, 27)
+        self.cleared = self.triggered + timedelta(minutes=13)
+        self.episode = "ep:S6:one"
+
+    def write(self, cursor, kind, observed):
+        return _write_occurrence(cursor, rule_code="S6_DOOR_OPEN", device_id="DR-001",
+            severity="WARNING", occurrence_kind=kind, observed_at=observed,
+            episode_key=self.episode, episode_started_at=self.triggered,
+            event_type="DOOR_OPENED" if kind == "TRIGGERED" else "DOOR_CLOSED",
+            details={"device_event_id": f"source-{kind.lower()}"})
+
+    def test_trigger_and_clear_share_wire_key_with_contiguous_sequence(self):
+        cursor = OccurrenceCursor(rule_version=7)
+        self.assertTrue(self.write(cursor, "TRIGGERED", self.triggered))
+        trigger = cursor.occurrence_payload
+        mapping = cursor.mapping
+        self.assertEqual(trigger["kind"], "occurrence")
+        self.assertEqual(trigger["occurrence_seq"], 1)
+        self.assertEqual(trigger["rule_version"], 7)
+        trigger_event_id = trigger["event_id"]
+
+        cursor.occurrence_payload = None
+        self.assertTrue(self.write(cursor, "CLEARED", self.cleared))
+        clear = cursor.occurrence_payload
+        self.assertEqual(cursor.mapping, mapping)
+        self.assertEqual(clear["kind"], "cleared")
+        self.assertEqual(clear["occurrence_seq"], 2)
+        self.assertEqual(clear["alarm_key"], trigger["alarm_key"])
+        self.assertEqual(clear["episode_key"], trigger["episode_key"])
+        self.assertNotEqual(clear["event_id"], trigger_event_id)
+        self.assertEqual(cursor.outbox_payload, clear)
+
+    def test_clear_cannot_overtake_trigger_mapping(self):
+        cursor = OccurrenceCursor()
+        with self.assertRaisesRegex(ValueError, "mapping is missing"):
+            self.write(cursor, "CLEARED", self.cleared)
+        self.assertIsNone(cursor.occurrence_payload)
+
+    def test_source_rule_version_zero_is_not_silently_rewritten(self):
+        cursor = OccurrenceCursor(rule_version=0)
+        self.write(cursor, "TRIGGERED", self.triggered)
+        self.assertEqual(cursor.occurrence_payload["rule_version"], 0)
+
+    def test_invalid_rule_version_fails_before_occurrence_insert(self):
+        cursor = OccurrenceCursor(rule_version=-1)
+        with self.assertRaisesRegex(ValueError, "config_version"):
+            self.write(cursor, "TRIGGERED", self.triggered)
+        self.assertIsNone(cursor.occurrence_payload)
+
+
+class LifecycleSuppressionTests(unittest.TestCase):
+    class Cursor:
+        def __init__(self, result):
+            self.result = result
+            self.sql = None
+            self.params = None
+
+        def execute(self, sql, params=()):
+            self.sql, self.params = " ".join(sql.split()), params
+
+        def fetchone(self):
+            return self.result
+
+    def test_manual_close_lookup_requires_no_sensor_clear(self):
+        expected = ("ep:S1:existing", datetime(2026, 10, 30, 8, 0))
+        cursor = self.Cursor(expected)
+        actual = _manually_closed_uncleared_episode(
+            cursor, "S1_TEMP_HIGH", "TH-001")
+        self.assertEqual(actual, expected)
+        self.assertIn("l.state='closed'", cursor.sql)
+        self.assertIn("a.occurrence_kind='CLEARED'", cursor.sql)
+        self.assertEqual(cursor.params, ("S1_TEMP_HIGH", "TH-001"))
 
 
 if __name__ == "__main__":

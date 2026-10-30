@@ -2,12 +2,12 @@
 import os
 import unittest
 import uuid
-from datetime import datetime
 
 from fastapi import HTTPException
 
 from api import latest, list_devices
 from core.database import db_connection
+from core.clock import now_utc
 from ingestor import save_message
 
 
@@ -63,7 +63,7 @@ class MultiSiteIntegrationTests(unittest.TestCase):
     def publish(self, org, device, value):
         save_message(f"nw/v1/{org}/site-1/{device}/telemetry", {
             "schema_version": 1, "device_id": device, "boot_id": "multi-site-test",
-            "seq": 1, "ts": datetime(2026, 10, 21, 1, 0).isoformat() + "Z",
+            "seq": 1, "ts": now_utc().isoformat() + "Z",
             "quality": "good", "data": {"temperature": value}})
 
     def test_ingestion_runtime_and_api_are_isolated_by_organization(self):

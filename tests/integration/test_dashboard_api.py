@@ -52,11 +52,22 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn("temperature", metrics)
         self.assertIn("humidity", metrics)
         self.assertIn("measured_at", metrics["temperature"])
+        self.assertEqual(metrics["temperature"]["unit"], "Cel")
+        self.assertEqual(metrics["humidity"]["unit"], "%RH")
+        self.assertIn(body["quality"], ("good", "error"))
+        self.assertIn(body["data_status"], ("LIVE", "STALE", "ERROR"))
+        self.assertEqual(body["timezone"], "Asia/Ho_Chi_Minh")
+        self.assertIn("measured_at_utc", body)
+        self.assertIn("measured_at_local", body)
+        self.assertIn("age_seconds", body)
         status, history = self.get("/api/v1/devices/TH-001/telemetry?metric=temperature&limit=2&offset=0")
         self.assertEqual(status, 200)
         self.assertEqual((history["limit"], history["offset"]), (2, 0))
         self.assertLessEqual(len(history["points"]), 2)
         self.assertTrue(all(point["metric"] == "temperature" for point in history["points"]))
+        self.assertTrue(all(point["unit"] == "Cel" for point in history["points"]))
+        self.assertTrue(all("quality" in point and "measured_at_local" in point
+                            for point in history["points"]))
 
     def test_s6_events_and_latest_door_state(self):
         status, body = self.get("/api/v1/devices/DR-001/events?limit=1&offset=0")
@@ -67,7 +78,10 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn("door_state", event["payload"]["data"])
         status, latest = self.get("/api/v1/devices/DR-001/latest")
         self.assertEqual(status, 200)
-        self.assertIn(latest["latest_event"]["door_state"], ("open", "closed"))
+        self.assertIn(latest["door_state"], ("open", "closed"))
+        self.assertIn(latest["latest_snapshot"]["door_state"], ("open", "closed"))
+        self.assertEqual(latest["timezone"], "Asia/Ho_Chi_Minh")
+        self.assertIn("received_at_local", latest["latest_snapshot"])
 
     def test_device_status_and_alarm_projection(self):
         status, body = self.get("/api/v1/devices/TH-001/status?history_limit=2")

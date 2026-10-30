@@ -46,6 +46,8 @@ class Dev1V13IntegrationTests(unittest.TestCase):
         with db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM alarm_lifecycle WHERE org_code=%s",(cls.org,))
+                cur.execute("DELETE FROM alarm_outbox WHERE wire_alarm_key IN (SELECT wire_alarm_key FROM alarm_episode_mappings WHERE device_id=%s)",(cls.device,))
+                cur.execute("DELETE FROM alarm_occurrences WHERE device_id=%s",(cls.device,))
                 cur.execute("DELETE FROM alarm_episode_mappings WHERE device_id=%s",(cls.device,))
                 cur.execute("DELETE FROM rule_runtime_state WHERE rule_code=%s",(cls.rule,))
                 cur.execute("DELETE FROM rule_definitions WHERE rule_code=%s",(cls.rule,))
@@ -94,6 +96,39 @@ class Dev1V13IntegrationTests(unittest.TestCase):
         reverse={**body,"version":2,"state":"acknowledged"};self.assertEqual(self.request("POST",f"/api/v1/alarms/{wire}/state",reverse)[0],200)
         self.assertEqual(self.request("POST",f"/api/v1/alarms/{wire}/state",{**body,"version":3,"state":"closed"})[0],200)
         self.assertEqual(self.request("POST",f"/api/v1/alarms/{wire}/state",{**body,"version":4,"state":"in_progress"})[0],409)
+
+    def test_06b_external_alarm_key_maps_back_to_internal_episode(self):
+        internal=f"{self.rule}:{self.device}:1700000010"
+        external="NW-LOCAL-RULE-S1:NW-LOCAL-TH001:1700000010"
+        occurrence=f"occurrence:{uuid.uuid4().hex}"
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO alarm_episode_mappings
+                    (internal_episode_key,wire_alarm_key,episode_started_at,rule_code,device_id)
+                    VALUES(%s,%s,now() at time zone 'utc',%s,%s)""",
+                    (f"ep:{uuid.uuid4().hex}",internal,self.rule,self.device))
+                cur.execute("""INSERT INTO alarm_occurrences
+                    (alarm_key,episode_key,occurrence_kind,rule_code,device_id,severity,
+                     event_type,triggered_at,payload_json)
+                    VALUES(%s,%s,'TRIGGERED',%s,%s,'HIGH','TEST',now() at time zone 'utc',%s::jsonb)""",
+                    (occurrence,internal,self.rule,self.device,json.dumps({"alarm_key":internal})))
+                cur.execute("""INSERT INTO alarm_outbox
+                    (alarm_key,wire_alarm_key,payload_json,next_attempt_at,created_at)
+                    VALUES(%s,%s,%s::jsonb,now() at time zone 'utc',now() at time zone 'utc')""",
+                    (occurrence,internal,json.dumps({"kind":"occurrence","alarm_key":external,
+                                                    "rule_id":"NW-LOCAL-RULE-S1",
+                                                    "device_id":"NW-LOCAL-TH001"})))
+            conn.commit()
+        body={**self.alarm_state_body,"alarm_key":external,"state":"closed","version":1}
+        status,result=self.request("POST",f"/api/v1/alarms/{external}/state",body)
+        self.assertEqual(status,200,result)
+        self.assertEqual(result["resource_id"],external)
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT state FROM alarm_lifecycle WHERE wire_alarm_key=%s",(internal,))
+                self.assertEqual(cur.fetchone()[0],"closed")
+                cur.execute("SELECT count(*) FROM alarm_lifecycle WHERE wire_alarm_key=%s",(external,))
+                self.assertEqual(cur.fetchone()[0],0)
 
     def test_07_bridge_202_and_duplicate_ack(self):
         adapter=NextGrpAdapter(self.bridge+"/internal/events/alarm",5,token="mock-development-token",allow_insecure_mock=True,require_202=True)

@@ -15,6 +15,20 @@ def _alarm_key(rule_code, device_id, source_key, occurrence_kind="TRIGGERED"):
     return f"m1:{rule_code}:{_key(rule_code, device_id, source_key, occurrence_kind)}"
 
 
+def _manually_closed_uncleared_episode(cur, rule_code, device_id):
+    """Find a Dev 1-closed episode whose physical condition has not cleared."""
+    cur.execute("""SELECT m.internal_episode_key,m.episode_started_at
+        FROM alarm_episode_mappings m
+        JOIN alarm_lifecycle l ON l.wire_alarm_key=m.wire_alarm_key
+        WHERE m.rule_code=%s AND m.device_id=%s AND l.state='closed'
+          AND NOT EXISTS (
+              SELECT 1 FROM alarm_occurrences a
+              WHERE a.episode_key=m.internal_episode_key
+                AND a.occurrence_kind='CLEARED')
+        ORDER BY l.updated_at DESC LIMIT 1""", (rule_code, device_id))
+    return cur.fetchone()
+
+
 SCOPE_MATCH = """(
     (r.scope_type='DEVICE' AND r.device_id=v.device_id) OR
     (r.scope_type='PROFILE' AND r.scope_profile_code=v.profile_code) OR
@@ -75,10 +89,14 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
             (internal_episode_key,wire_alarm_key,episode_started_at,rule_code,device_id)
             VALUES(%s,%s,%s,%s,%s) ON CONFLICT(internal_episode_key) DO NOTHING""",
             (episode_key,wire_alarm_key,started,rule_code,device_id))
-    cur.execute("SELECT wire_alarm_key,episode_started_at FROM alarm_episode_mappings WHERE internal_episode_key=%s",(episode_key,))
+    cur.execute("""SELECT wire_alarm_key,episode_started_at FROM alarm_episode_mappings
+        WHERE internal_episode_key=%s FOR UPDATE""", (episode_key,))
     mapping=cur.fetchone()
-    wire_alarm_key=mapping[0] if mapping else alarm_key
-    episode_started=mapping[1] if mapping else (episode_started_at or observed_at)
+    if mapping is None:
+        raise ValueError("alarm episode mapping is missing; refusing out-of-order occurrence")
+    wire_alarm_key,episode_started=mapping
+    cur.execute("SELECT count(*) FROM alarm_occurrences WHERE episode_key=%s", (episode_key,))
+    occurrence_seq=int(cur.fetchone()[0]) + 1
     delivery_event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"nextwireless:{alarm_key}"))
     mapped_event = ({("S1", "TRIGGERED"): "TEMPERATURE_HIGH",
                      ("S1", "CLEARED"): "TEMPERATURE_RECOVERED",
@@ -95,16 +113,21 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
     cur.execute("""SELECT d.org_code,d.zone_code,r.config_version
         FROM devices d JOIN rule_definitions r ON r.rule_code=%s WHERE d.device_id=%s""",
         (rule_code,device_id))
-    org_code,zone_code,rule_version=cur.fetchone()
+    registry=cur.fetchone()
+    if registry is None:
+        raise ValueError("alarm device/rule registry entry is missing")
+    org_code,zone_code,rule_version=registry
+    if not isinstance(rule_version, int) or rule_version < 0:
+        raise ValueError("rule config_version is missing or invalid")
     severity_wire={"INFO":"Low","WARNING":"Medium","HIGH":"High","CRITICAL":"Critical"}.get(severity,severity)
     event_id=str(uuid.uuid5(uuid.NAMESPACE_URL,f"nextwireless:source:{alarm_key}"))
     payload={"event_id":delivery_event_id,"org_code":org_code,"alarm_key":wire_alarm_key,
         "episode_key":wire_alarm_key,
         "kind":"occurrence" if occurrence_kind=="TRIGGERED" else "cleared",
         "rule_id":rule_code,
-        "rule_version":max(1,rule_version),"device_id":device_id,"zone_code":zone_code,
+        "rule_version":rule_version,"device_id":device_id,"zone_code":zone_code,
         "severity":severity_wire,"episode_start":episode_started.isoformat(timespec="milliseconds")+"Z",
-        "occurrence_seq":1,"event":{"event_id":event_id,"event_type":mapped_event,
+        "occurrence_seq":occurrence_seq,"event":{"event_id":event_id,"event_type":mapped_event,
         "ts":observed_at.isoformat(timespec="milliseconds")+"Z","data":details}}
     payload["raised_at" if occurrence_kind=="TRIGGERED" else "cleared_at"]=observed_at.isoformat(timespec="milliseconds")+"Z"
     cur.execute("""INSERT INTO alarm_occurrences
@@ -126,13 +149,19 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
 
 def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
     cur.execute(f"""SELECT r.rule_code,r.threshold_value,r.hysteresis_value,r.hold_seconds,
-            r.clear_hold_seconds,r.quiet_seconds,r.severity FROM rule_definitions r
+            r.clear_hold_seconds,r.quiet_seconds,r.severity,v.telemetry_interval_seconds
+            FROM rule_definitions r
             CROSS JOIN devices v WHERE v.device_id=%s AND r.rule_kind='THRESHOLD'
             AND r.metric=%s AND r.enabled=TRUE AND {SCOPE_MATCH}
             ORDER BY r.rule_code""", (device_id, metric))
     alarms = 0
-    for rule_code, threshold, hysteresis, hold_s, clear_s, quiet_s, severity in cur.fetchall():
+    for rule_code, threshold, hysteresis, hold_s, clear_s, quiet_s, severity, interval_s in cur.fetchall():
         if threshold is None or hysteresis < 0:
+            continue
+        # Persist delayed data, but never let a future/stale device timestamp
+        # manufacture a current alarm. A normal QoS/reconnect delay remains allowed.
+        skew_seconds = (received_at - measured_at).total_seconds()
+        if skew_seconds < -300 or skew_seconds > max(300, int(interval_s) * 2):
             continue
         cur.execute("""INSERT INTO rule_runtime_state(rule_code,device_id)
             VALUES (%s,%s) ON CONFLICT (rule_code,device_id) DO NOTHING""", (rule_code, device_id))
@@ -142,8 +171,8 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
         hold_start, recovery, active, last_sample, last_fired, episode, episode_started = cur.fetchone()
         if last_sample is not None and measured_at <= last_sample:
             continue
-        # URD continuity requirement: if sample gap exceeds 2x interval (120s), reset continuity window
-        if last_sample is not None and (measured_at - last_sample).total_seconds() > 120:
+        # A gap longer than two configured samples breaks a continuous hold.
+        if last_sample is not None and (measured_at - last_sample).total_seconds() > int(interval_s) * 2:
             if not active and hold_start is not None:
                 hold_start = measured_at
             if active and recovery is not None:
@@ -154,7 +183,12 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
             entered_at=hold_start, recovery_started_at=recovery, active=bool(active))
         if transition == "TRIGGERED":
             allowed = last_fired is None or (measured_at - last_fired).total_seconds() >= quiet_s
-            if allowed:
+            manually_closed = _manually_closed_uncleared_episode(cur, rule_code, device_id)
+            if manually_closed:
+                episode, episode_started = manually_closed
+                next_active = True
+                next_hold = None
+            elif allowed:
                 episode = f"ep:{rule_code}:{_key(device_id, metric, hold_start or measured_at)}"
                 episode_started = hold_start or measured_at
                 alarms += int(_write_occurrence(

@@ -1,5 +1,6 @@
 """Transport-independent MQTT topic and payload validation."""
 from datetime import datetime, timezone
+import re
 
 from core.clock import now_utc
 
@@ -20,7 +21,7 @@ def parse_timestamp(value):
         raise ValueError("invalid ts") from exc
     if parsed.tzinfo is None:
         raise ValueError("ts must include timezone")
-    return parsed.astimezone(timezone.utc).replace(tzinfo=None), "device"
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None), "ntp"
 
 
 def validate_telemetry_data(payload, point_definitions=None):
@@ -53,8 +54,25 @@ def validate_telemetry_data(payload, point_definitions=None):
                 raise ValueError("non-finite metric")
             minimum, maximum = definition.get("min_value"), definition.get("max_value")
             if minimum is not None and value < minimum or maximum is not None and value > maximum:
-                raise ValueError(f"{metric} out of range")
+                return "error", {}
     return quality, data
+
+
+def validate_door_heartbeat(payload, point_definitions):
+    if payload.get("msg_kind") != "heartbeat":
+        raise ValueError("door telemetry must use msg_kind=heartbeat")
+    if payload.get("quality", "good") != "good":
+        raise ValueError("door heartbeat quality must be good")
+    data = payload["data"]
+    if set(data) != {"door_state"}:
+        raise ValueError("door heartbeat requires only door_state")
+    definition = point_definitions.get("door_state")
+    if not definition or definition.get("data_type") != "string":
+        raise ValueError("door_state is not supported by device profile")
+    allowed = definition.get("allowed_values") or []
+    if data["door_state"] not in allowed:
+        raise ValueError("invalid door heartbeat")
+    return data["door_state"]
 
 
 def door_heartbeat_event(profile, body, event_types=None):
@@ -87,6 +105,26 @@ def validate_message(topic, payload):
     if not isinstance(payload.get("data"), dict):
         raise ValueError("data must be JSON object")
     stamp, source = parse_timestamp(payload.get("ts"))
+    supplied_source = payload.get("ts_source")
+    if supplied_source not in (None, "ntp", "none", "server", "device"):
+        raise ValueError("ts_source must be ntp, none, or server")
+    if supplied_source in ("none", "server") and payload.get("ts") is not None:
+        raise ValueError("ts_source without device time cannot accompany ts")
+    if supplied_source == "ntp" and payload.get("ts") is None:
+        raise ValueError("ts_source=ntp requires ts")
+    if supplied_source == "none":
+        # measured_at uses receive time, but provenance remains `none`: the
+        # device explicitly reported that it had no trustworthy clock.
+        source = "none"
+    kind = payload.get("msg_kind")
+    expected = {"telemetry": ("measurement", "heartbeat"), "event": ("event",),
+                "status": ("status",)}[channel]
+    if kind is not None and kind not in expected:
+        raise ValueError("msg_kind does not match MQTT channel")
+    # v1.1 messages use the compact boot ID. Legacy messages without the new
+    # discriminator remain ingestible so historical devices can be upgraded safely.
+    if kind is not None and not re.fullmatch(r"[0-9a-fA-F]{6,8}", payload["boot_id"]):
+        raise ValueError("boot_id must be 6-8 hexadecimal characters")
     if channel == "event":
         if not isinstance(payload.get("event_id"), str) or not payload["event_id"]:
             raise ValueError("event_id required")

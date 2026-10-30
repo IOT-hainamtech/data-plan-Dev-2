@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 
 from core.database import db_connection
 from ingestor import save_message
-from status.service import reconcile_device_timeouts, update_device_presence
+from status.service import (enqueue_status_reconciliation,
+                            reconcile_device_timeouts, update_device_presence)
 
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")
@@ -157,14 +158,33 @@ class StatusTrackerTests(unittest.TestCase):
         self.assertEqual(status[0], "offline")
         self.assertEqual(self.get_history_count("offline"), 1)
 
-        # Running reconciler again at t0 + 130s does NOT duplicate offline transition
+        # Running reconciler again does not duplicate the offline transition.
         with db_connection() as conn:
             with conn.cursor() as cur:
-                count = reconcile_device_timeouts(cur, self.t0 + timedelta(seconds=130), device_id=self.dev_id)
+                count = reconcile_device_timeouts(
+                    cur, self.t0 + timedelta(seconds=130), device_id=self.dev_id)
             conn.commit()
         self.assertEqual(count, 0)
         self.assertEqual(self.get_history_count("offline"), 1)
 
+    def test_periodic_reconciliation_is_idempotent_per_five_minute_bucket(self):
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                update_device_presence(cur, device_id=self.dev_id, boot_id=self.boot_id,
+                                       received_at=self.t0, explicit_state="online")
+                first = enqueue_status_reconciliation(cur, self.t0)
+                second = enqueue_status_reconciliation(cur, self.t0 + timedelta(minutes=4))
+            conn.commit()
+        self.assertGreaterEqual(first, 1)
+        self.assertEqual(second, 0)
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT count(*) FROM status_outbox
+                    WHERE device_id=%s AND payload_json->>'reason'='telemetry'""",
+                    (self.dev_id,))
+                # The immediate online change uses reason=connect; exactly one
+                # periodic snapshot in this bucket uses reason=telemetry.
+                self.assertEqual(cur.fetchone()[0], 1)
 
 if __name__ == "__main__":
     unittest.main()
