@@ -3,6 +3,7 @@ param(
     [string]$WifiSsid,
     [SecureString]$WifiPassword,
     [SecureString]$MqttPassword,
+    [string]$MqttCredentialFile,
     [ValidatePattern('^[A-Za-z0-9.-]+$')][string]$MqttHost = '192.168.1.40',
     [switch]$UseExistingMqttSecret,
     [switch]$Force
@@ -39,6 +40,11 @@ if ($UseExistingMqttSecret) {
     if (-not $line) { throw "Existing MQTT password for $DeviceId is missing" }
     $mqttPlain = $line.Substring($key.Length + 1)
 } else {
+    if ($MqttCredentialFile) {
+        if (-not (Test-Path -LiteralPath $MqttCredentialFile)) { throw 'MQTT credential handoff file is missing' }
+        $encryptedCredential = (Get-Content -LiteralPath $MqttCredentialFile -Raw).Trim()
+        $MqttPassword = $encryptedCredential | ConvertTo-SecureString
+    }
     if (-not $MqttPassword) { $MqttPassword = Read-Host "MQTT password for $DeviceId" -AsSecureString }
     $mqttPlain = ConvertFrom-LocalSecureString $MqttPassword
 }

@@ -19,16 +19,31 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Migration idempotency pass failed' }
 
     docker compose -p $ProjectName run --rm --no-deps `
+      -v "${root}/app:/app" -v "${root}/tests:/app/tests" `
       -e DB_HOST=postgres -e DB_PORT=5432 -e DB_NAME=nextwireless -e DB_USER=nw_user `
       -e DB_PASSWORD=migration-test-only-password -e RUN_DB_TESTS=1 `
       data-plane python -m unittest -v tests.integration.test_ingestor_contract `
-      tests.integration.test_rule_engine_integration tests.integration.test_multi_site_integration
+      tests.integration.test_rule_engine_integration tests.integration.test_outbox_integration `
+      tests.integration.test_status_tracker tests.integration.test_multi_site_integration
     if ($LASTEXITCODE -ne 0) { throw 'Fresh-schema ingestion/rule tests failed' }
 
     docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
       -U nw_user -d nextwireless -c `
       "SELECT conname FROM pg_constraint WHERE conrelid='telemetry_reports'::regclass AND conname IN ('ck_telemetry_reports_quality','uq_telemetry_report') ORDER BY conname;"
     if ($LASTEXITCODE -ne 0) { throw 'Fresh-schema constraint verification failed' }
+    docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+      -U nw_user -d nextwireless -c `
+      "SELECT retention_days,enabled FROM telemetry_retention_config; SELECT count(*) AS active_retention_jobs FROM timescaledb_information.jobs WHERE proc_name='policy_retention' AND hypertable_name='telemetry';"
+    if ($LASTEXITCODE -ne 0) { throw 'Disabled retention verification failed' }
+
+    Get-Content -LiteralPath (Join-Path $root 'db/rollback/016_retention_configuration.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Retention rollback failed' }
+    docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+      -U nw_user -d nextwireless -c `
+      "SELECT to_regclass('public.telemetry_retention_config') IS NULL AS rollback_removed_control_table;"
+    if ($LASTEXITCODE -ne 0) { throw 'Retention rollback verification failed' }
     Write-Host "Fresh migration test passed in isolated project $ProjectName"
 } finally {
     $savedPreference = $ErrorActionPreference

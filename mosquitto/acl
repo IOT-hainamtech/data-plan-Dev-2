@@ -3,10 +3,16 @@ topic read nw/v1/#
 topic write nw/internal/health
 
 user TH-001
-topic write nw/v1/demo/demo-site/TH-001/#
+topic write nw/v1/demo/demo-site/TH-001/telemetry
+topic write nw/v1/demo/demo-site/TH-001/event
+topic write nw/v1/demo/demo-site/TH-001/status
 
 user DR-001
-topic write nw/v1/demo/demo-site/DR-001/#
+topic write nw/v1/demo/demo-site/DR-001/telemetry
+topic write nw/v1/demo/demo-site/DR-001/event
+topic write nw/v1/demo/demo-site/DR-001/status
 
 user TH-002
-topic write nw/v1/demo/demo-site/TH-002/#
+topic write nw/v1/demo/demo-site/TH-002/telemetry
+topic write nw/v1/demo/demo-site/TH-002/event
+topic write nw/v1/demo/demo-site/TH-002/status

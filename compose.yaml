@@ -88,8 +88,31 @@ services:
         condition: service_healthy
     command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
 
+  # Optional office/lab TLS termination. It is profile-gated and requires the
+  # operator to provide certificate paths; plain HTTP remains loopback-only.
+  data-api-tls:
+    profiles: ["api-tls"]
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    ports:
+      - "${DATA_API_TLS_BIND_IP:-127.0.0.1}:${DATA_API_TLS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/nginx/data-api-tls.conf:/etc/nginx/nginx.conf:ro
+      - ${DATA_API_TLS_CERT_FILE:-./deploy/tls/SET_CERT_PATH}:/run/tls/server.crt:ro
+      - ${DATA_API_TLS_KEY_FILE:-./deploy/tls/SET_KEY_PATH}:/run/tls/server.key:ro
+    depends_on:
+      data-api:
+        condition: service_started
+
   # Development-only receiver. No traffic leaves the Compose network.
   mock-nextgrp:
+    profiles: ["mock"]
     build: *app-build
     restart: unless-stopped
     environment:
@@ -107,10 +130,11 @@ services:
 
   outbox-worker:
     build: *app-build
+    profiles: ["outbound"]
     restart: unless-stopped
     environment:
       <<: *runtime_env
-      OUTBOX_DELIVERY_ENABLED: "true"
+      OUTBOX_DELIVERY_ENABLED: ${OUTBOX_DELIVERY_ENABLED:-false}
       BRIDGE_MODE: ${BRIDGE_MODE:-mock}
       NEXTGRP_ALARM_URL: http://mock-nextgrp:8080/mock/v1/alarms
       BRIDGE_ALARM_URL: ${BRIDGE_ALARM_URL:-http://mock-nextgrp:8080/internal/events/alarm}
@@ -119,9 +143,8 @@ services:
       BRIDGE_REQUIRE_202: "true"
       BRIDGE_ALLOW_INSECURE_HTTP: ${BRIDGE_ALLOW_INSECURE_HTTP:-true}
       BRIDGE_DELIVER_NOT_BEFORE: ${BRIDGE_DELIVER_NOT_BEFORE:-}
-      OUTBOX_MAX_ATTEMPTS: "8"
-      OUTBOX_BACKOFF_BASE_SECONDS: "2"
-      OUTBOX_BACKOFF_MAX_SECONDS: "300"
+      OUTBOX_BACKOFF_BASE_SECONDS: "1"
+      OUTBOX_BACKOFF_MAX_SECONDS: "60"
       OUTBOX_BACKOFF_JITTER: "0.2"
       OUTBOX_LEASE_SECONDS: "60"
       OUTBOX_METRICS_SECONDS: "30"
@@ -132,6 +155,7 @@ services:
         condition: service_started
       mock-nextgrp:
         condition: service_healthy
+        required: false
     command: ["python", "-u", "outbox_worker.py"]
 
   snapshot-worker:
@@ -144,6 +168,10 @@ services:
       BRIDGE_ALLOW_INSECURE_MOCK: ${BRIDGE_ALLOW_INSECURE_HTTP:-true}
       BRIDGE_ALLOWED_ORGS: ${DP_INBOUND_ALLOWED_ORGS:-demo,v13-test}
       SNAPSHOT_INTERVAL_SECONDS: "300"
+      DEV1_CONFIG_URL: ${DEV1_CONFIG_URL:-}
+      DEV1_CONFIG_DEVICE_IDS: ${DEV1_CONFIG_DEVICE_IDS:-}
+      DEV1_SITE_NAME: ${DEV1_SITE_NAME:-}
+      DEV1_ALLOW_INSECURE_LAB: ${DEV1_ALLOW_INSECURE_LAB:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -151,6 +179,7 @@ services:
         condition: service_started
       mock-nextgrp:
         condition: service_healthy
+        required: false
     command: ["python", "-u", "snapshot_worker.py"]
 
   simulator:
@@ -164,7 +193,7 @@ services:
       MQTT_PORT: "8883"
       MQTT_CA_FILE: /run/mqtt/ca.crt
       MQTT_TLS_MIN_VERSION: "1.2"
-      SIM_INTERVAL: "10"
+      SIM_INTERVAL: "60"
       SIM_ORG_CODE: ${SIM_ORG_CODE:-demo}
       SIM_SITE_CODE: ${SIM_SITE_CODE:-demo-site}
       SIM_S1_DEVICE_ID: ${SIM_S1_DEVICE_ID:-TH-001}
