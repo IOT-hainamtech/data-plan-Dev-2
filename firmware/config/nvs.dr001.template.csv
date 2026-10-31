@@ -13,6 +13,8 @@ profile_code,data,string,DOOR_SENSOR
 sensor_type,data,string,reed_door
 telemetry_sec,data,u32,60
 heartbeat_sec,data,u32,60
+ntp_server_1,data,string,pool.ntp.org
+ntp_server_2,data,string,time.google.com
 sht31_address,data,u8,68
 temp_offset,data,string,0.0
 humidity_offset,data,string,0.0
