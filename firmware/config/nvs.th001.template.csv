@@ -5,9 +5,9 @@ wifi_password,data,string,__WIFI_PASSWORD__
 mqtt_uri,data,string,mqtts://192.168.1.40:8883
 mqtt_username,data,string,TH-001
 mqtt_password,data,string,__MQTT_PASSWORD__
-mqtt_ca,data,binary,certs/mqtt_ca.pem
-org_code,data,string,demo
-site_code,data,string,demo-site
+mqtt_ca,file,binary,certs/mqtt_ca.pem
+org_code,data,string,hainam
+site_code,data,string,hq
 device_id,data,string,TH-001
 profile_code,data,string,TEMP_HUM_SENSOR
 sensor_type,data,string,sht31
