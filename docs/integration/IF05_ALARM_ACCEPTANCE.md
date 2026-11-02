@@ -30,8 +30,9 @@ Every mapping must exist as enabled and confirmed in
 `integration_identity_mappings`. The runtime Rule version, frozen Outbox payload
 version and confirmed external mapping version must all match. A `cleared`
 occurrence reports condition recovery and is sent regardless of `auto_close`;
-only nextGRP decides whether that recovery also closes the Alarm. S6 cleared
-remains blocked until Dev 1 confirms its event type; Dev 2 does not guess it.
+only nextGRP decides whether that recovery also closes the Alarm. Dev 1 has
+confirmed `DOOR_OPENED` for S6 occurrence and `DOOR_CLOSED` for S6 cleared;
+`auto_close=false` therefore does not suppress the cleared notification.
 
 Runtime version `0` is a bootstrap value: migrations originally seed the Rules,
 and migration 009 later adds `config_version BIGINT DEFAULT 0`. It is not proof

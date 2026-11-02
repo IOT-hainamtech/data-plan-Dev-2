@@ -145,19 +145,23 @@ class Dev1ConfigTests(unittest.TestCase):
                 self.assertEqual(mapped["kind"], "cleared")
                 self.assertEqual(mapped["event"]["event_type"], "TEMP_NORMAL")
 
-    def test_s6_cleared_remains_blocked_without_confirmed_event_type(self):
-        rows = {
-            ("RUNTIME", "S6_DOOR_OPEN"): (1, {"auto_close": True}),
-            ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
-            ("DEVICE", "DR-001"): ("NW-LOCAL-DR001", 1),
-            ("RULE", "S6_DOOR_OPEN"): ("NW-LOCAL-RULE-S6", 1),
-        }
-        payload = {"org_code": "demo", "device_id": "DR-001", "rule_id": "S6_DOOR_OPEN",
-            "rule_version": 1, "kind": "cleared", "episode_start": "2026-10-30T03:00:00Z",
-            "alarm_key": "internal", "episode_key": "internal",
-            "event": {"event_id": "source-1", "event_type": "DOOR_CLOSED", "data": {}}}
-        with self.assertRaisesRegex(ValueError, "event_type is not confirmed"):
-            map_alarm_payload(MappingCursor(rows), payload)
+    def test_s6_cleared_uses_confirmed_door_closed_independent_of_auto_close(self):
+        for runtime_config in ({"auto_close": True}, {"auto_close": False}, {}):
+            with self.subTest(runtime_config=runtime_config):
+                rows = {
+                    ("RUNTIME", "S6_DOOR_OPEN"): (1, runtime_config),
+                    ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
+                    ("DEVICE", "DR-001"): ("NW-LOCAL-DR001", 1),
+                    ("RULE", "S6_DOOR_OPEN"): ("NW-LOCAL-RULE-S6", 1),
+                }
+                payload = {"org_code": "demo", "device_id": "DR-001",
+                    "rule_id": "S6_DOOR_OPEN", "rule_version": 1, "kind": "cleared",
+                    "episode_start": "2026-10-30T03:00:00Z", "alarm_key": "internal",
+                    "episode_key": "internal", "event": {"event_id": "source-1",
+                        "event_type": "old", "data": {}}}
+                mapped = map_alarm_payload(MappingCursor(rows), payload)
+                self.assertEqual(mapped["kind"], "cleared")
+                self.assertEqual(mapped["event"]["event_type"], "DOOR_CLOSED")
 
     def test_external_callback_key_resolves_only_from_frozen_outbound_mapping(self):
         self.assertEqual(resolve_internal_alarm_key(

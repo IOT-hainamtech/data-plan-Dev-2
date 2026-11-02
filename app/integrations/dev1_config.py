@@ -266,6 +266,7 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
             ("S1_TEMP_HIGH", "occurrence"): "TEMP_HIGH",
             ("S1_TEMP_HIGH", "cleared"): "TEMP_NORMAL",
             ("S6_DOOR_OPEN", "occurrence"): "DOOR_OPENED",
+            ("S6_DOOR_OPEN", "cleared"): "DOOR_CLOSED",
         }
         event_type = event_types.get((payload["rule_id"], payload.get("kind")))
         if event_type is None:
