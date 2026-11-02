@@ -60,14 +60,22 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIn("measured_at_utc", body)
         self.assertIn("measured_at_local", body)
         self.assertIn("age_seconds", body)
-        status, history = self.get("/api/v1/devices/TH-001/telemetry?metric=temperature&limit=2&offset=0")
+        status, history = self.get("/api/v1/devices/TH-001/telemetry?metric=temperature&limit=2")
         self.assertEqual(status, 200)
-        self.assertEqual((history["limit"], history["offset"]), (2, 0))
+        self.assertEqual(history["limit"], 2)
+        self.assertIn("next_cursor", history)
         self.assertLessEqual(len(history["points"]), 2)
         self.assertTrue(all(point["metric"] == "temperature" for point in history["points"]))
         self.assertTrue(all(point["unit"] == "Cel" for point in history["points"]))
         self.assertTrue(all("quality" in point and "measured_at_local" in point
                             for point in history["points"]))
+        if history["next_cursor"]:
+            cursor = urllib.parse.quote(history["next_cursor"], safe="")
+            status, page2 = self.get(
+                f"/api/v1/devices/TH-001/telemetry?metric=temperature&limit=2&cursor={cursor}")
+            self.assertEqual(status, 200)
+            self.assertTrue(set(p["seq"] for p in history["points"]).isdisjoint(
+                p["seq"] for p in page2["points"]))
 
     def test_s6_events_and_latest_door_state(self):
         status, body = self.get("/api/v1/devices/DR-001/events?limit=1&offset=0")

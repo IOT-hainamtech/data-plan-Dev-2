@@ -1,40 +1,30 @@
-# Dev 2 → Dev 1 live push readiness
+# Dev 2 ↔ Dev 1 integration readiness
 
-Audit date: 2026-11-02. Confirmed HTTPS base URL:
-`https://semisweet-conceal-gizzard.ngrok-free.dev`.
+Audit date: 2026-11-02.
 
-## Confirmed methods
+## Architecture decision
 
-| Data | Frappe method | Contract status |
-|---|---|---|
-| Device configuration | `config_controller.get_device_config` | Confirmed GET |
-| Connection status | `status_controller.receive_status` | POST transport confirmed; ACK contract remains partial |
-| Alarm occurrence/cleared | `alarm_controller.receive_alarm` | Confirmed POST, `payload=JSON_STRING` |
-| Command claim/ACK | `command_controller.claim_command`, `ack_command` | Known, not used by S1/S6 live push |
-| Raw telemetry | — | **BLOCKED: no endpoint/schema/ACK in confirmed contract** |
-| Raw device event | — | **BLOCKED: no endpoint/schema/ACK in confirmed contract** |
+Raw telemetry and raw device events are not pushed continuously to nextGRP.
+Data Plane remains the system of record for telemetry/event storage and exposes
+them to the nextGRP backend through IF-07 Data API. The Dev 1 ingestion methods
+`receive_telemetry` and `receive_event`, although available, are outside the
+mandatory BRD/URD flow currently being implemented.
 
-Do not derive names such as `receive_telemetry` or `receive_event`. Do not send
-temperature, humidity, or door transitions through the Alarm endpoint.
+The supported integration boundaries are:
 
-## Authentication
+- IF-01/02/03: nextGRP → Data Plane configuration synchronization.
+- IF-04: Data Plane → nextGRP online/offline status.
+- IF-05: Data Plane → nextGRP Alarm occurrence/cleared.
+- IF-06: nextGRP → Data Plane Alarm lifecycle callback.
+- IF-07: nextGRP backend → Data API read-only Dashboard queries.
 
-Outbound Frappe requests require a dedicated `API_KEY:API_SECRET` pair:
+The Alarm/Status adapters and configuration synchronization remain independent.
+The Alarm Outbox Worker remains profile-gated and disabled by default; existing
+PENDING rows must not be sent as part of IF-07 verification.
 
-```http
-Authorization: token API_KEY:API_SECRET
-X-Frappe-Site-Name: nextgrp.localhost
-Accept: application/json
-```
+## Identity mapping
 
-This is unrelated to Data API's inbound Bearer token. The credential must be
-provided at runtime through `DEV1_SERVICE_TOKEN`, or the separate
-`DEV1_API_KEY` and `DEV1_API_SECRET` variables. Current runtime inspection found
-no Frappe service credential, so authenticated GET and POST remain blocked.
-
-## Approved identity mapping
-
-| Dev 2 | Dev 1 |
+| Data Plane | nextGRP |
 |---|---|
 | `hainam` | `NW-LOCAL-ORG-001` |
 | `hq` | `NW-LOCAL-SITE-001` |
@@ -43,46 +33,23 @@ no Frappe service credential, so authenticated GET and POST remain blocked.
 | `S1_TEMP_HIGH` | `NW-IT-RULE-S1` |
 | `S6_DOOR_OPEN` | `NW-IT-RULE-S6` |
 
-The mapping must be frozen per outbound record and never inferred from a device
-name. Runtime Data Plane registry values remain unchanged.
+Mapping belongs in the trusted Dev 1 backend/integration layer. The frontend
+must not choose arbitrary internal organization or device IDs. PostgreSQL
+Registry, ESP32 NVS and MQTT identities remain `hainam/hq/TH-001/DR-001`.
 
-## Required contract before implementation
+## IF-07 authentication
 
-Dev 1 must provide, separately for telemetry and device events:
+Data API authentication is not Frappe token authentication:
 
-1. Exact whitelisted Frappe method path and whether it is deployed on the HTTPS base URL.
-2. HTTP method, content type and exact form fields (or JSON body).
-3. Required/optional fields, types, units, timestamp semantics and schema version.
-4. Identity fields after mapping, including organization/site/profile/device.
-5. Stable idempotency key and duplicate behavior.
-6. Exact `response.message` ACK schema proving the record was persisted.
-7. Error semantics for 400/401/403/404/409/422/429/5xx.
-8. A read-back API or DocType query that confirms the saved record/device.
-
-Only then may Dev 2 add durable cursors/outboxes. Automatic delivery must use
-bounded exponential retry for 408/429/5xx/network failures, preserve identical
-payload and idempotency key on retry, stop on contract errors, redact credentials,
-and never claim the existing Alarm Outbox backlog.
-
-## Safe verification commands
-
-Connectivity without credentials:
-
-```powershell
-Invoke-RestMethod 'https://semisweet-conceal-gizzard.ngrok-free.dev/api/method/ping'
+```http
+Authorization: Bearer <DP_INBOUND_TOKEN>
+X-Org-Code: hainam
+Accept: application/json
 ```
 
-Authenticated configuration GET after a new service credential is installed in
-the process environment:
+The credential must be held by the Dev 1 backend, not the browser. The API
+rejects a missing/invalid Bearer token and rejects organizations outside the
+credential's configured scope.
 
-```powershell
-$env:DEV1_BASE_URL='https://semisweet-conceal-gizzard.ngrok-free.dev'
-$env:DEV1_SITE_NAME='nextgrp.localhost'
-$env:DEV1_SERVICE_TOKEN='<API_KEY>:<API_SECRET>'
-$env:PYTHONPATH='app;.'
-python -m tests.e2e.dev1_dev2.runner --mode read-only
-Remove-Item Env:DEV1_SERVICE_TOKEN
-```
-
-Do not use `--mode post` for live telemetry/event. Its existing POST mode is an
-Alarm staging test with synthetic fixtures and is not authorized for runtime.
+See [DEV1_IF07_DATA_API_HANDOFF.md](DEV1_IF07_DATA_API_HANDOFF.md) for endpoint,
+mapping, freshness and error-handling details.
