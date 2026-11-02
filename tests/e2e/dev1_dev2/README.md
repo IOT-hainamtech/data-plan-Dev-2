@@ -41,6 +41,10 @@ Credentials missing either component fail closed immediately.
 
 ## Commands
 
+Raw telemetry and raw device-event push are not present in the confirmed Frappe
+contract. See `docs/integration/DEV1_LIVE_PUSH_READINESS.md`; do not invent an
+endpoint or reuse the Alarm API for sensor samples.
+
 Offline validation (safe default):
 
 ```powershell
