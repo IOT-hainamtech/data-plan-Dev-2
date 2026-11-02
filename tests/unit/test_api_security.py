@@ -45,8 +45,8 @@ class OutboxMetricsSecurityTests(unittest.TestCase):
             body = application.outbox_metrics(org_code="tenant-a")
 
         self.assertIn("JOIN alarm_occurrences", cursor.sql)
-        self.assertIn("JOIN devices", cursor.sql)
-        self.assertIn("WHERE d.org_code=%s", cursor.sql)
+        self.assertNotIn("JOIN devices", cursor.sql)
+        self.assertIn("WHERE a.payload_json->>'org_code'=%s", cursor.sql)
         self.assertEqual(cursor.params, ("tenant-a",))
         self.assertEqual(body, {
             "pending": 0,

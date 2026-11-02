@@ -21,6 +21,11 @@ never disabled for HTTPS.
 
 ## Authentication Contract
 
+This section describes Dev 2 calling Frappe. For the opposite read direction,
+Dev 1 must use a distinct Data API Bearer token and the fixed mapping documented
+in `docs/integration/DEV1_DATA_API_MINIMAL_MAPPING.md`; Frappe credentials sent
+to Data API correctly receive HTTP 401.
+
 Dev 1 Frappe contract requires:
 ```http
 Authorization: token API_KEY:API_SECRET
