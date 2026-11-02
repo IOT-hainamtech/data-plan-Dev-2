@@ -46,6 +46,74 @@ class RuleDatabaseTests(unittest.TestCase):
         self.assertEqual([row[0] for row in payloads], ["occurrence", "cleared"])
         self.assertTrue(all(row[1] for row in payloads))
 
+    def test_s1_hainam_full_threshold_lifecycle_and_disabled_demo_rule(self):
+        """Acceptance path for S1 without touching the live TH-001 database."""
+        self.cur.execute("""INSERT INTO organizations(org_code,display_name)
+            VALUES('hainam','Hai Nam') ON CONFLICT(org_code) DO NOTHING""")
+        self.cur.execute("""INSERT INTO sites(org_code,site_code,display_name,timezone)
+            VALUES('hainam','hq','HQ','Asia/Ho_Chi_Minh')
+            ON CONFLICT(org_code,site_code) DO NOTHING""")
+        self.cur.execute("""INSERT INTO zones(org_code,site_code,zone_code,display_name)
+            VALUES('hainam','hq','office','Office')
+            ON CONFLICT(org_code,site_code,zone_code) DO NOTHING""")
+        self.cur.execute("""UPDATE devices SET org_code='hainam',site_code='hq',zone_code='office'
+            WHERE device_id='TH-001'""")
+        self.cur.execute("""INSERT INTO rule_definitions
+            (rule_code,device_id,rule_kind,metric,threshold_value,hysteresis_value,
+             hold_seconds,clear_hold_seconds,quiet_seconds,severity,enabled,scope_type,
+             config_version,config_json)
+            VALUES('S1_DEMO_TEMP_HIGH','TH-001','THRESHOLD','temperature',30,1,
+                   0,120,0,'HIGH',FALSE,'DEVICE',2,'{"operator":">"}'::jsonb)
+            ON CONFLICT(rule_code) DO UPDATE SET enabled=FALSE,config_version=2""")
+
+        def sample(seconds, value):
+            at = self.t0 + timedelta(seconds=seconds)
+            return on_telemetry(self.cur, device_id="TH-001", metric="temperature",
+                                value=value, measured_at=at, received_at=at)
+
+        self.assertEqual(sample(0, 29.5), 0)       # below threshold
+        for seconds in (10, 70, 130, 190, 250):  # above, not yet 300 seconds
+            self.assertEqual(sample(seconds, 31.0), 0)
+        self.cur.execute("SELECT count(*) FROM alarm_occurrences WHERE rule_code='S1_TEMP_HIGH'")
+        self.assertEqual(self.cur.fetchone()[0], 0)
+
+        self.assertEqual(sample(310, 31.0), 1)     # exactly 300 seconds continuous
+        self.assertEqual(sample(370, 31.5), 0)     # no duplicate while still active
+        with self.conn.cursor() as restarted:
+            restarted.execute("""SELECT is_active,episode_key FROM rule_runtime_state
+                WHERE rule_code='S1_TEMP_HIGH' AND device_id='TH-001'""")
+            active, episode = restarted.fetchone()
+            self.assertTrue(active)
+            self.assertIsNotNone(episode)
+
+        self.assertEqual(sample(371, 28.9), 0)     # below 30 - 1 hysteresis
+        self.assertEqual(sample(431, 28.8), 0)
+        self.assertEqual(sample(491, 28.7), 1)     # 120-second clear hold
+
+        self.cur.execute("""SELECT a.occurrence_kind,a.episode_key,m.wire_alarm_key,
+                a.payload_json->>'org_code',a.payload_json->>'alarm_key',
+                a.payload_json->>'occurrence_seq'
+            FROM alarm_occurrences a JOIN alarm_episode_mappings m
+              ON m.internal_episode_key=a.episode_key
+            WHERE a.rule_code='S1_TEMP_HIGH' ORDER BY a.triggered_at""")
+        rows = self.cur.fetchall()
+        self.assertEqual([row[0] for row in rows], ["TRIGGERED", "CLEARED"])
+        self.assertEqual(rows[0][1], rows[1][1])
+        self.assertEqual(rows[0][2], rows[1][2])
+        self.assertEqual(rows[0][2], rows[0][4])
+        self.assertEqual(rows[1][2], rows[1][4])
+        self.assertEqual([row[3] for row in rows], ["hainam", "hainam"])
+        self.assertEqual([row[5] for row in rows], ["1", "2"])
+        self.cur.execute("""SELECT count(*) FROM alarm_outbox
+            WHERE wire_alarm_key=%s""", (rows[0][2],))
+        self.assertEqual(self.cur.fetchone()[0], 2)
+        self.cur.execute("""SELECT count(*) FROM alarm_occurrences
+            WHERE rule_code='S1_DEMO_TEMP_HIGH'""")
+        self.assertEqual(self.cur.fetchone()[0], 0)
+        self.cur.execute("""SELECT count(*) FROM rule_runtime_state
+            WHERE rule_code='S1_DEMO_TEMP_HIGH'""")
+        self.assertEqual(self.cur.fetchone()[0], 0)
+
     def test_s6_timer_duplicate_and_close(self):
         on_event(self.cur, device_id="DR-001", event_id="integration-open",
                  event_type="DOOR_OPENED", received_at=self.t0,
