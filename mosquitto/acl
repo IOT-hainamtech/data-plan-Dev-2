@@ -6,11 +6,17 @@ user TH-001
 topic write nw/v1/hainam/hq/TH-001/telemetry
 topic write nw/v1/hainam/hq/TH-001/event
 topic write nw/v1/hainam/hq/TH-001/status
+topic write nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/TH-001/telemetry
+topic write nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/TH-001/event
+topic write nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/TH-001/status
 
 user DR-001
 topic write nw/v1/hainam/hq/DR-001/telemetry
 topic write nw/v1/hainam/hq/DR-001/event
 topic write nw/v1/hainam/hq/DR-001/status
+topic write nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/DR-001/telemetry
+topic write nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/DR-001/event
+topic write nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/DR-001/status
 
 user TH-002
 topic write nw/v1/demo/demo-site/TH-002/telemetry

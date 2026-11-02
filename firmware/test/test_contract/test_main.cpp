@@ -5,7 +5,9 @@
 void test_topic_contract() {
     TEST_ASSERT_EQUAL_STRING("nw/v1/demo/demo-site/TH-001/telemetry",
         nw::topic("demo", "demo-site", "TH-001", "telemetry").c_str());
-    TEST_ASSERT_TRUE(nw::topic("hainam", "hq", "DR-001", "event").size() > 0);
+    TEST_ASSERT_EQUAL_STRING(
+        "nw/v1/NW-LOCAL-ORG-001/NW-LOCAL-SITE-001/DR-001/event",
+        nw::topic("NW-LOCAL-ORG-001", "NW-LOCAL-SITE-001", "DR-001", "event").c_str());
     TEST_ASSERT_TRUE(nw::topic("bad/org", "hq", "DR-001", "event").empty());
     TEST_ASSERT_TRUE(nw::topic("demo", "hq", "DR-001", "unknown").empty());
 }

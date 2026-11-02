@@ -6,17 +6,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MqttProvisioningSecurityTests(unittest.TestCase):
-    def test_device_acl_has_only_three_exact_publish_channels(self):
+    def test_device_acl_has_only_exact_publish_channels_during_cutover(self):
         acl = (ROOT / "mosquitto" / "acl").read_text(encoding="utf-8")
-        routes = {"TH-001": ("hainam", "hq"), "DR-001": ("hainam", "hq"),
-                  "TH-002": ("demo", "demo-site")}
-        for device, (org, site) in routes.items():
+        routes = {"TH-001": [("hainam", "hq"), ("NW-LOCAL-ORG-001", "NW-LOCAL-SITE-001")],
+                  "DR-001": [("hainam", "hq"), ("NW-LOCAL-ORG-001", "NW-LOCAL-SITE-001")],
+                  "TH-002": [("demo", "demo-site")]}
+        for device, locations in routes.items():
             block = acl.split(f"user {device}\n", 1)[1].split("\nuser ", 1)[0]
-            self.assertEqual(set(block.strip().splitlines()), {
-                f"topic write nw/v1/{org}/{site}/{device}/telemetry",
-                f"topic write nw/v1/{org}/{site}/{device}/event",
-                f"topic write nw/v1/{org}/{site}/{device}/status",
-            })
+            expected = {f"topic write nw/v1/{org}/{site}/{device}/{channel}"
+                        for org, site in locations
+                        for channel in ("telemetry", "event", "status")}
+            self.assertEqual(set(block.strip().splitlines()), expected)
             self.assertNotIn("/#", block)
             self.assertNotIn("topic read", block)
 

@@ -109,8 +109,7 @@ def outbox_metrics(org_code: str = Depends(tenant_org)):
                 min(o.created_at) FILTER (WHERE o.delivery_state IN ('PENDING','IN_FLIGHT'))
                 FROM alarm_outbox o
                 JOIN alarm_occurrences a ON a.alarm_key=o.alarm_key
-                JOIN devices d ON d.device_id=a.device_id
-                WHERE d.org_code=%s""", (org_code,))
+                WHERE a.payload_json->>'org_code'=%s""", (org_code,))
             pending, failed, failures, oldest = cur.fetchone()
     age = max(0.0, (utc_now() - oldest).total_seconds()) if oldest else 0.0
     return {"pending": pending, "failed": failed, "delivery_failures": failures,
@@ -375,15 +374,15 @@ def list_alarms(limit: int = Query(default=50, ge=1, le=500),
     with db_connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute("""SELECT count(*) FROM alarm_occurrences a
-                JOIN devices d ON d.device_id=a.device_id AND d.org_code=%s""", (org_code,))
+                WHERE a.payload_json->>'org_code'=%s""", (org_code,))
             total = cur.fetchone()["count"]
             cur.execute("""SELECT a.alarm_key, a.episode_key, a.rule_code, a.device_id, a.severity,
                 a.occurrence_kind, a.event_type, a.triggered_at, a.cleared_at, a.payload_json,
                 o.delivery_state, o.attempt_count, o.ack_id, o.delivered_at,l.state AS lifecycle_state
                 FROM alarm_occurrences a
-                JOIN devices d ON d.device_id=a.device_id AND d.org_code=%s
                 LEFT JOIN alarm_outbox o ON a.alarm_key = o.alarm_key
                 LEFT JOIN alarm_lifecycle l ON l.wire_alarm_key=a.payload_json->>'alarm_key'
+                WHERE a.payload_json->>'org_code'=%s
                 ORDER BY a.triggered_at DESC LIMIT %s OFFSET %s""", (org_code, limit, offset))
             rows = cur.fetchall()
     return {"total": total, "limit": limit, "offset": offset, "alarms": [
