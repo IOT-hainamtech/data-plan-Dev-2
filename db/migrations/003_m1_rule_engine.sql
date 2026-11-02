@@ -31,13 +31,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_alarm_episode_kind
 CREATE INDEX IF NOT EXISTS idx_rule_runtime_due
     ON rule_runtime_state (current_state, state_changed_at) WHERE current_state = 'open';
 
-UPDATE rule_definitions SET hold_seconds=300, hysteresis_value=1.0,
-    clear_hold_seconds=120, quiet_seconds=600,
-    updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
-WHERE rule_code='S1_TEMP_HIGH' AND hold_seconds=30 AND quiet_seconds=30;
+-- These are bootstrap upgrades only. On a fresh schema migration 009 has not
+-- added config_version yet; on an existing schema never rewrite IF-03 rules.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='rule_definitions'
+                 AND column_name='config_version') THEN
+        UPDATE rule_definitions SET hold_seconds=300, hysteresis_value=1.0,
+            clear_hold_seconds=120, quiet_seconds=600,
+            updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+        WHERE rule_code='S1_TEMP_HIGH' AND config_version=0
+          AND hold_seconds=30 AND quiet_seconds=30;
 
-UPDATE rule_definitions SET hold_seconds=300, clear_hold_seconds=0, quiet_seconds=600,
-    business_start=TIME '08:00:00', business_end=TIME '18:00:00',
-    schedule_timezone='Asia/Ho_Chi_Minh', updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
-WHERE rule_code='S6_DOOR_OPEN'
-  AND business_start IS NULL AND business_end IS NULL AND schedule_timezone IS NULL;
+        UPDATE rule_definitions SET hold_seconds=300, clear_hold_seconds=0,
+            quiet_seconds=600, business_start=TIME '08:00:00',
+            business_end=TIME '18:00:00', schedule_timezone='Asia/Ho_Chi_Minh',
+            updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+        WHERE rule_code='S6_DOOR_OPEN' AND config_version=0
+          AND business_start IS NULL AND business_end IS NULL
+          AND schedule_timezone IS NULL;
+    ELSE
+        UPDATE rule_definitions SET hold_seconds=300, hysteresis_value=1.0,
+            clear_hold_seconds=120, quiet_seconds=600,
+            updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+        WHERE rule_code='S1_TEMP_HIGH' AND hold_seconds=30 AND quiet_seconds=30;
+
+        UPDATE rule_definitions SET hold_seconds=300, clear_hold_seconds=0,
+            quiet_seconds=600, business_start=TIME '08:00:00',
+            business_end=TIME '18:00:00', schedule_timezone='Asia/Ho_Chi_Minh',
+            updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+        WHERE rule_code='S6_DOOR_OPEN'
+          AND business_start IS NULL AND business_end IS NULL
+          AND schedule_timezone IS NULL;
+    END IF;
+END $$;

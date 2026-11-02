@@ -1,12 +1,16 @@
 """PostgreSQL integration tests; enable with RUN_DB_TESTS=1."""
 import os
+from pathlib import Path
 import unittest
 import uuid
 from datetime import datetime, timedelta
+import sqlparse
+from psycopg.types.json import Jsonb
 
 from api.integration import alarm_state
 from api.models import AlarmStateIn
 from core.database import db_connection
+from registry.sync import apply_rule, payload_hash
 from rules.engine import (_manually_closed_uncleared_episode, evaluate_due_rules,
                           on_event, on_telemetry)
 
@@ -176,6 +180,37 @@ class RuleDatabaseTests(unittest.TestCase):
         self.assertEqual(rows[0][2], rows[1][2])
         self.assertNotEqual(rows[0][3], rows[1][3])
         self.assertEqual([row[4] for row in rows], ["DOOR_OPENED", "DOOR_CLOSED"])
+
+    def test_migration_003_does_not_overwrite_if03_rule_v2(self):
+        self.cur.execute("""UPDATE rule_definitions SET config_version=2,hold_seconds=300,
+            clear_hold_seconds=0,quiet_seconds=0,business_start=NULL,business_end=NULL,
+            schedule_timezone=NULL WHERE rule_code='S6_DOOR_OPEN'""")
+        migration = Path("/migrations/003_m1_rule_engine.sql").read_text(encoding="utf-8")
+        for statement in sqlparse.split(migration):
+            if statement.strip():
+                self.cur.execute(statement)
+        self.cur.execute("""SELECT config_version,hold_seconds,quiet_seconds,business_start,
+            business_end,schedule_timezone FROM rule_definitions
+            WHERE rule_code='S6_DOOR_OPEN'""")
+        self.assertEqual(self.cur.fetchone(), (2, 300, 0, None, None, None))
+
+    def test_duplicate_if03_reconciles_materialized_rule_drift(self):
+        rule = {"rule_id": "S6_DOOR_OPEN", "version": 2, "org_code": "demo",
+            "rule_kind": "STATE_CHANGE", "scope": {"type": "DEVICE", "device_id": "DR-001"},
+            "metric": None, "event_type": "DOOR_OPENED", "threshold": None,
+            "hysteresis": 0, "duration_s": 0, "open_limit_s": 300,
+            "clear_duration_s": 0, "quiet_window_s": 0, "business_start": None,
+            "business_end": None, "timezone": None, "severity": "Medium",
+            "auto_close": False, "enabled": True}
+        self.cur.execute("""UPDATE rule_definitions SET config_version=2,payload_hash=%s,
+            config_json=%s,quiet_seconds=600,business_start='08:00',business_end='18:00',
+            schedule_timezone='Asia/Ho_Chi_Minh' WHERE rule_code='S6_DOOR_OPEN'""",
+            (payload_hash(rule), Jsonb(rule)))
+        result = apply_rule(self.cur, rule)
+        self.assertTrue(result["duplicate"])
+        self.cur.execute("""SELECT hold_seconds,quiet_seconds,business_start,business_end,
+            schedule_timezone FROM rule_definitions WHERE rule_code='S6_DOOR_OPEN'""")
+        self.assertEqual(self.cur.fetchone(), (300, 0, None, None, None))
 
     def test_s6_outside_business_hours_fires_immediately_with_correct_event_type(self):
         outside = datetime(2026, 10, 14, 0, 30)  # 07:30 Asia/Ho_Chi_Minh

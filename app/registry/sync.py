@@ -115,7 +115,7 @@ def apply_device(cur,data):
 
 def apply_rule(cur,data):
     digest=payload_hash(data); code=data["rule_id"]; scope=data["scope"]
-    if version_decision(cur,"rule_definitions","rule_code=%s",(code,),data["version"],digest)=="duplicate": return sync_response(code,data["version"],True)
+    decision=version_decision(cur,"rule_definitions","rule_code=%s",(code,),data["version"],digest)
     org=data["org_code"]
     st=scope["type"]
     device=scope.get("device_id") if st=="DEVICE" else None
@@ -146,4 +146,6 @@ def apply_rule(cur,data):
        data.get("quiet_window_s",0),severity,data["enabled"],data.get("business_start"),data.get("business_end"),
        data.get("timezone"),st,org if st in ("ORGANIZATION","SITE","ZONE") else scope.get("org_code"),
        scope.get("site_code"),scope.get("zone_code"),scope.get("profile_code"),data["version"],digest,Jsonb(cfg)))
-    return sync_response(code,data["version"])
+    # A same-version/same-hash replay is also reconciliation: restore derived
+    # columns if an old bootstrap migration or operational drift changed them.
+    return sync_response(code,data["version"],decision=="duplicate")

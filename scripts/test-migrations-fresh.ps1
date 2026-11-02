@@ -1,7 +1,7 @@
 param([string]$ProjectName = "nw-migration-test-$PID")
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$volumes = @("${ProjectName}_postgres_data", "${ProjectName}_mqtt_data")
+$volumes = @("${ProjectName}_postgres_data", "${ProjectName}_mqtt_data", "${ProjectName}_mqtt_ca")
 $env:PG_PASSWORD = 'migration-test-only-password'
 try {
     docker compose -p $ProjectName up -d postgres

@@ -6,6 +6,21 @@ x-app-build: &app-build
   dockerfile: app/Dockerfile
 
 services:
+  # One-shot initializer for the public CA only. Docker Desktop exposes direct
+  # file bind mounts as root:0600; copying into a dedicated volume lets the
+  # application remain UID 10001 without exposing broker private keys.
+  mqtt-ca-init:
+    image: alpine:3.20
+    profiles: ["mqtt-ca-init"]
+    user: "0:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./mosquitto/certs/ca.crt:/source/ca.crt:ro
+      - mqtt_ca:/target
+    command: ["sh", "-ec", "cp /source/ca.crt /target/ca.crt && chmod 0444 /target/ca.crt"]
+
   postgres:
     image: timescale/timescaledb:2.30.2-pg17
     restart: unless-stopped
@@ -65,7 +80,7 @@ services:
       MQTT_CA_FILE: /run/mqtt/ca.crt
       MQTT_TLS_MIN_VERSION: "1.2"
     volumes:
-      - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
+      - mqtt_ca:/run/mqtt:ro
       - ./db/migrations:/migrations:ro
     depends_on:
       postgres:
@@ -199,7 +214,7 @@ services:
       SIM_S1_DEVICE_ID: ${SIM_S1_DEVICE_ID:-TH-001}
       SIM_S6_DEVICE_ID: ${SIM_S6_DEVICE_ID:-DR-001}
     volumes:
-      - ./mosquitto/certs/ca.crt:/run/mqtt/ca.crt:ro
+      - mqtt_ca:/run/mqtt:ro
     depends_on:
       data-plane:
         condition: service_started
@@ -237,3 +252,4 @@ services:
 volumes:
   postgres_data:
   mqtt_data:
+  mqtt_ca:

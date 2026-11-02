@@ -19,6 +19,19 @@ class ComposeSecurityTests(unittest.TestCase):
         self.assertIn('profiles: ["outbound"]', worker)
         self.assertIn("OUTBOX_DELIVERY_ENABLED: ${OUTBOX_DELIVERY_ENABLED:-false}", worker)
 
+    def test_non_root_data_plane_uses_dedicated_ca_only_volume(self):
+        root = Path(__file__).resolve().parents[2]
+        compose = (root / "compose.yaml").read_text(encoding="utf-8")
+        dockerfile = (root / "app" / "Dockerfile").read_text(encoding="utf-8")
+        data_plane = compose.split("  data-plane:", 1)[1].split("  data-api:", 1)[0]
+        ca_init = compose.split("  mqtt-ca-init:", 1)[1].split("  postgres:", 1)[0]
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn("mqtt_ca:/run/mqtt:ro", data_plane)
+        self.assertNotIn("certs/ca.crt:/run/mqtt", data_plane)
+        self.assertIn("./mosquitto/certs/ca.crt:/source/ca.crt:ro", ca_init)
+        self.assertNotIn("server.key", ca_init)
+        self.assertIn("chmod 0444 /target/ca.crt", ca_init)
+
 
 if __name__ == "__main__":
     unittest.main()
