@@ -131,6 +131,52 @@ class RuleDatabaseTests(unittest.TestCase):
             WHERE rule_code='S6_DOOR_OPEN' AND occurrence_kind='TRIGGERED'""")
         self.assertEqual(self.cur.fetchone()[0], "DOOR_OPEN_TOO_LONG")
 
+    def test_s6_v2_unscheduled_open_limit_restart_short_open_and_clear(self):
+        self.cur.execute("""UPDATE rule_definitions SET config_version=2,hold_seconds=300,
+            clear_hold_seconds=0,quiet_seconds=0,business_start=NULL,business_end=NULL,
+            schedule_timezone=NULL,config_json='{"auto_close":false,"open_limit_s":300}'::jsonb
+            WHERE rule_code='S6_DOOR_OPEN'""")
+
+        # A short opening is recorded, then cancelled without any Alarm/CLEARED.
+        on_event(self.cur, device_id="DR-001", event_id="v2-short-open",
+                 event_type="DOOR_OPENED", received_at=self.t0,
+                 payload={"data": {"door_state": "open"}})
+        evaluate_due_rules(self.cur, self.t0 + timedelta(seconds=60))
+        on_event(self.cur, device_id="DR-001", event_id="v2-short-close",
+                 event_type="DOOR_CLOSED", received_at=self.t0 + timedelta(seconds=61),
+                 payload={"data": {"door_state": "closed"}})
+        self.cur.execute("SELECT count(*) FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN'")
+        self.assertEqual(self.cur.fetchone()[0], 0)
+
+        opened = self.t0 + timedelta(seconds=100)
+        on_event(self.cur, device_id="DR-001", event_id="v2-long-open",
+                 event_type="DOOR_OPENED", received_at=opened,
+                 payload={"data": {"door_state": "open"}})
+        evaluate_due_rules(self.cur, opened + timedelta(seconds=299))
+        self.cur.execute("SELECT count(*) FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN'")
+        self.assertEqual(self.cur.fetchone()[0], 0)
+
+        # A new cursor represents process restart; persisted state completes the timer.
+        with self.conn.cursor() as restarted:
+            self.assertEqual(evaluate_due_rules(
+                restarted, opened + timedelta(seconds=300)), 1)
+            self.assertEqual(evaluate_due_rules(
+                restarted, opened + timedelta(seconds=305)), 0)
+        on_event(self.cur, device_id="DR-001", event_id="v2-long-close",
+                 event_type="DOOR_CLOSED", received_at=opened + timedelta(seconds=306),
+                 payload={"data": {"door_state": "closed"}})
+        self.cur.execute("""SELECT occurrence_kind,payload_json->>'rule_version',
+                payload_json->>'alarm_key',payload_json->>'event_id',
+                payload_json->'event'->>'event_type'
+            FROM alarm_occurrences WHERE rule_code='S6_DOOR_OPEN'
+            ORDER BY occurrence_kind DESC""")
+        rows = self.cur.fetchall()
+        self.assertEqual([row[0] for row in rows], ["TRIGGERED", "CLEARED"])
+        self.assertEqual([row[1] for row in rows], ["2", "2"])
+        self.assertEqual(rows[0][2], rows[1][2])
+        self.assertNotEqual(rows[0][3], rows[1][3])
+        self.assertEqual([row[4] for row in rows], ["DOOR_OPENED", "DOOR_CLOSED"])
+
     def test_s6_outside_business_hours_fires_immediately_with_correct_event_type(self):
         outside = datetime(2026, 10, 14, 0, 30)  # 07:30 Asia/Ho_Chi_Minh
         on_event(self.cur, device_id="DR-001", event_id="outside-open",

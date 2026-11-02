@@ -186,14 +186,16 @@ def reconcile_device_config(cur, config, system_code="nextgrp"):
         business_end = rule.get("business_end", schedule.get("business_end"))
         schedule_timezone = rule.get("schedule_timezone", schedule.get("timezone"))
         if rule["rule_type"] == "STATE_CHANGE":
-            if not all((business_start, business_end, schedule_timezone)):
-                raise ValueError("Dev 1 S6 Rule requires business_start, business_end and schedule_timezone")
-            try:
-                wall_time.fromisoformat(business_start)
-                wall_time.fromisoformat(business_end)
-                ZoneInfo(schedule_timezone)
-            except (ValueError, ZoneInfoNotFoundError) as exc:
-                raise ValueError("Dev 1 S6 Rule has an invalid business schedule") from exc
+            schedule_parts = (business_start, business_end, schedule_timezone)
+            if any(schedule_parts):
+                if not all(schedule_parts):
+                    raise ValueError("Dev 1 S6 Rule has an incomplete business schedule")
+                try:
+                    wall_time.fromisoformat(business_start)
+                    wall_time.fromisoformat(business_end)
+                    ZoneInfo(schedule_timezone)
+                except (ValueError, ZoneInfoNotFoundError) as exc:
+                    raise ValueError("Dev 1 S6 Rule has an invalid business schedule") from exc
         rule_data = {"rule_id": rule_id, "version": rule["version"], "org_code": org,
             "rule_kind": rule["rule_type"], "scope": {"type": "DEVICE", "device_id": device_id},
             "metric": rule.get("data_point"), "operator": rule.get("operator"),

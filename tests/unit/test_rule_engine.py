@@ -101,6 +101,13 @@ class DoorTests(unittest.TestCase):
         self.assertFalse(door_should_fire(now=opened + timedelta(seconds=299), **kwargs))
         self.assertTrue(door_should_fire(now=opened + timedelta(seconds=300), **kwargs))
 
+    def test_no_schedule_requires_configured_open_limit(self):
+        opened = datetime(2026, 10, 14, 2, 0)
+        kwargs = dict(opened_at=opened, hold_seconds=300, business_start=None,
+                      business_end=None, schedule_timezone=None)
+        self.assertFalse(door_should_fire(now=opened + timedelta(seconds=299), **kwargs))
+        self.assertTrue(door_should_fire(now=opened + timedelta(seconds=300), **kwargs))
+
     def test_weekend_is_always_outside_business_hours(self):
         # 2026-10-17 is Saturday; 02:00 UTC is 09:00 in Ho Chi Minh City.
         saturday = datetime(2026, 10, 17, 2, 0)

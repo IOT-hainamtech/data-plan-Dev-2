@@ -74,6 +74,10 @@ def is_business_hours(at_utc, start, end, timezone_name):
 
 def door_should_fire(*, opened_at, now, hold_seconds, business_start,
                      business_end, schedule_timezone):
+    # A schedule is optional.  Without one, open_limit_s is an unconditional
+    # continuous-open hold; do not silently disable the Rule.
+    if not all((business_start, business_end, schedule_timezone)):
+        return (now - opened_at).total_seconds() >= hold_seconds
     if not is_business_hours(now, business_start, business_end, schedule_timezone):
         return True
     return (now - opened_at).total_seconds() >= hold_seconds
@@ -230,8 +234,6 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
             ORDER BY r.rule_code""", (device_id,))
     changes = 0
     for rule_code, severity, hold_s, clear_s, quiet_s, start, end, tz_name in cur.fetchall():
-        if start is None or end is None or not tz_name:
-            continue
         cur.execute("""INSERT INTO rule_runtime_state(rule_code,device_id)
             VALUES (%s,%s) ON CONFLICT (rule_code,device_id) DO NOTHING""", (rule_code, device_id))
         cur.execute("""SELECT current_state,state_changed_at,is_active,last_fired_at,episode_key,
@@ -297,14 +299,15 @@ def evaluate_due_rules(cur, now, device_id=None):
           AND s.is_active=FALSE AND (%s::text IS NULL OR s.device_id=%s)
         FOR UPDATE OF s""", (device_id, device_id))
     for code, dev, severity, hold_s, quiet_s, start, end, tz_name, opened_at, last_fired, episode, source_event in cur.fetchall():
-        if not all((start, end, tz_name, opened_at, episode)):
+        if not all((opened_at, episode)):
             continue
         if not door_should_fire(opened_at=opened_at, now=now, hold_seconds=hold_s,
                                 business_start=start, business_end=end, schedule_timezone=tz_name):
             continue
         if last_fired and (now - last_fired).total_seconds() < quiet_s:
             continue
-        outside = not is_business_hours(now, start, end, tz_name)
+        has_schedule = all((start, end, tz_name))
+        outside = has_schedule and not is_business_hours(now, start, end, tz_name)
         created = _write_occurrence(
             cur, rule_code=code, device_id=dev, severity=severity,
             occurrence_kind="TRIGGERED", observed_at=now, episode_key=episode,

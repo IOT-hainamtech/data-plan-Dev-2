@@ -24,7 +24,7 @@ and occurrence count are valid. Duplicate ACKs additionally require
 | `TH-001` | `NW-IT-TH001` | — |
 | `DR-001` | `NW-IT-DR001` | — |
 | `S1_TEMP_HIGH` | `NW-IT-RULE-S1` | 2 |
-| `S6_DOOR_OPEN` | `NW-IT-RULE-S6` | 1 |
+| `S6_DOOR_OPEN` | `NW-IT-RULE-S6` | 2 |
 
 Every mapping must exist as enabled and confirmed in
 `integration_identity_mappings`. The runtime Rule version, frozen Outbox payload

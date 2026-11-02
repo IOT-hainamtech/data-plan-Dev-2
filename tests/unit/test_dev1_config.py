@@ -149,19 +149,37 @@ class Dev1ConfigTests(unittest.TestCase):
         for runtime_config in ({"auto_close": True}, {"auto_close": False}, {}):
             with self.subTest(runtime_config=runtime_config):
                 rows = {
-                    ("RUNTIME", "S6_DOOR_OPEN"): (1, runtime_config),
+                    ("RUNTIME", "S6_DOOR_OPEN"): (2, runtime_config),
                     ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
                     ("DEVICE", "DR-001"): ("NW-LOCAL-DR001", 1),
-                    ("RULE", "S6_DOOR_OPEN"): ("NW-LOCAL-RULE-S6", 1),
+                    ("RULE", "S6_DOOR_OPEN"): ("NW-LOCAL-RULE-S6", 2),
                 }
                 payload = {"org_code": "demo", "device_id": "DR-001",
-                    "rule_id": "S6_DOOR_OPEN", "rule_version": 1, "kind": "cleared",
+                    "rule_id": "S6_DOOR_OPEN", "rule_version": 2, "kind": "cleared",
                     "episode_start": "2026-10-30T03:00:00Z", "alarm_key": "internal",
                     "episode_key": "internal", "event": {"event_id": "source-1",
                         "event_type": "old", "data": {}}}
                 mapped = map_alarm_payload(MappingCursor(rows), payload)
                 self.assertEqual(mapped["kind"], "cleared")
+                self.assertEqual(mapped["rule_version"], 2)
                 self.assertEqual(mapped["event"]["event_type"], "DOOR_CLOSED")
+
+    def test_s6_v2_occurrence_maps_dynamically_without_version_hardcode(self):
+        rows = {
+            ("RUNTIME", "S6_DOOR_OPEN"): (2, {"auto_close": False}),
+            ("ORGANIZATION", "hainam"): ("NW-LOCAL-ORG-001", 1),
+            ("DEVICE", "DR-001"): ("NW-IT-DR001", 1),
+            ("RULE", "S6_DOOR_OPEN"): ("NW-IT-RULE-S6", 2),
+        }
+        mapped = map_alarm_payload(MappingCursor(rows), {
+            "org_code": "hainam", "device_id": "DR-001", "rule_id": "S6_DOOR_OPEN",
+            "rule_version": 2, "kind": "occurrence",
+            "episode_start": "2026-11-02T08:00:00Z", "alarm_key": "internal",
+            "episode_key": "internal", "event": {"event_id": "source-1",
+                "event_type": "old", "data": {}}})
+        self.assertEqual(mapped["rule_id"], "NW-IT-RULE-S6")
+        self.assertEqual(mapped["rule_version"], 2)
+        self.assertEqual(mapped["event"]["event_type"], "DOOR_OPENED")
 
     def test_external_callback_key_resolves_only_from_frozen_outbound_mapping(self):
         self.assertEqual(resolve_internal_alarm_key(
@@ -227,7 +245,7 @@ class Dev1ConfigTests(unittest.TestCase):
         self.assertEqual((rule["business_start"], rule["business_end"], rule["timezone"]),
                          ("08:00:00", "18:00:00", "Asia/Ho_Chi_Minh"))
 
-    def test_s6_missing_schedule_and_profile_contradiction_fail_closed(self):
+    def test_s6_optional_schedule_and_profile_contradiction(self):
         base = {"device": {"device_id": "NW-LOCAL-DR001", "device_profile": "NW-LOCAL-S6",
             "site": "NW-LOCAL-SITE-001", "zone": None, "status": "Active",
             "connectivity_type": "WIFI", "config_version": 2},
@@ -237,10 +255,12 @@ class Dev1ConfigTests(unittest.TestCase):
             "rules": [{"rule_id": "NW-LOCAL-RULE-S6", "rule_type": "STATE_CHANGE",
                 "scope_type": "Device", "scope_ref": "NW-LOCAL-DR001",
                 "event_type": "DOOR_OPENED", "open_limit_s": 300, "version": 3}]}
-        with patch("integrations.dev1_config.apply_profile", return_value={}), \
-             patch("integrations.dev1_config.apply_device", return_value={}):
-            with self.assertRaisesRegex(ValueError, "requires business_start"):
-                reconcile_device_config(ReverseCursor(), base)
+        with patch("integrations.dev1_config.apply_profile", side_effect=lambda c, d: d), \
+             patch("integrations.dev1_config.apply_device", side_effect=lambda c, d: d), \
+             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d: d):
+            rule = reconcile_device_config(ReverseCursor(), base)[2]
+        self.assertEqual((rule["business_start"], rule["business_end"], rule["timezone"]),
+                         (None, None, None))
         base["profile"]["supports_telemetry"] = 0
         with self.assertRaisesRegex(ValueError, "supports_telemetry conflicts"):
             reconcile_device_config(ReverseCursor(), base)
