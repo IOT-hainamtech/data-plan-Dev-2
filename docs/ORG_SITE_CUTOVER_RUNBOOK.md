@@ -1,5 +1,10 @@
 # Physical Organization/Site cutover
 
+> **SUSPENDED:** Runtime cutover is not part of the current integration plan.
+> Dev 1 uses the fixed adapter mapping documented in
+> `docs/integration/DEV1_DATA_API_MINIMAL_MAPPING.md`. Do not execute this
+> runbook unless a new, explicit migration approval is issued.
+
 Target: `hainam/hq` → `NW-LOCAL-ORG-001/NW-LOCAL-SITE-001` for physical
 devices `TH-001` and `DR-001`. Device IDs, profiles, zones and rule codes do
 not change. Historical Alarm/Outbox payloads remain under their original org.

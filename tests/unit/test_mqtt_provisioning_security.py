@@ -6,10 +6,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MqttProvisioningSecurityTests(unittest.TestCase):
-    def test_device_acl_has_only_exact_publish_channels_during_cutover(self):
+    def test_device_acl_has_only_three_exact_runtime_publish_channels(self):
         acl = (ROOT / "mosquitto" / "acl").read_text(encoding="utf-8")
-        routes = {"TH-001": [("hainam", "hq"), ("NW-LOCAL-ORG-001", "NW-LOCAL-SITE-001")],
-                  "DR-001": [("hainam", "hq"), ("NW-LOCAL-ORG-001", "NW-LOCAL-SITE-001")],
+        routes = {"TH-001": [("hainam", "hq")],
+                  "DR-001": [("hainam", "hq")],
                   "TH-002": [("demo", "demo-site")]}
         for device, locations in routes.items():
             block = acl.split(f"user {device}\n", 1)[1].split("\nuser ", 1)[0]

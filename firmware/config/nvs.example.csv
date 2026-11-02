@@ -6,8 +6,8 @@ mqtt_uri,data,string,mqtts://192.0.2.10:8883
 mqtt_username,data,string,TH-001
 mqtt_password,data,string,CHANGE_ME
 mqtt_ca,file,binary,certs/mqtt_ca.pem
-org_code,data,string,NW-LOCAL-ORG-001
-site_code,data,string,NW-LOCAL-SITE-001
+org_code,data,string,hainam
+site_code,data,string,hq
 device_id,data,string,TH-001
 profile_code,data,string,TEMP_HUM_SENSOR
 sensor_type,data,string,sht31
