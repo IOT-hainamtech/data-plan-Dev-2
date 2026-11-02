@@ -54,5 +54,16 @@ restore the previous ignored NVS artifacts, and reconnect on old topics. Keep th
 transition ACL until old-topic LIVE data is proven. The rollback does not delete
 target registry rows or change any telemetry, event, Alarm, episode or Outbox row.
 
+Rollback changes registry and confirmed Organization/Site mapping only. Records
+received after cutover keep their original `payload_json.org_code` and are not
+reclassified. Consequently, after rollback the API may contain old-tenant Alarm
+history plus immutable target-tenant Alarm history created during the cutover
+window. Rollback does not undo external nextGRP changes, MQTT messages already
+published, or NVS flashing; those require their explicit operational rollback.
+
+Before production, run the isolated test from the repository root:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-org-site-cutover.ps1`
+
 After stable operation and an approved observation period, remove the six old
 `hainam/hq` ACL lines in a separate reviewed change.

@@ -81,6 +81,14 @@ DO $$ BEGIN
       AND org_code='NW-LOCAL-ORG-001' AND site_code='NW-LOCAL-SITE-001') <> 2 THEN
     RAISE EXCEPTION 'postflight: both physical devices were not aligned';
   END IF;
+  IF EXISTS (SELECT 1 FROM integration_identity_mappings
+      WHERE system_code='nextgrp' AND entity_type='ORGANIZATION'
+        AND internal_id='hainam' AND external_id='NW-LOCAL-ORG-001') OR
+     EXISTS (SELECT 1 FROM integration_identity_mappings
+      WHERE system_code='nextgrp' AND entity_type='SITE'
+        AND internal_id='hq' AND external_id='NW-LOCAL-SITE-001') THEN
+    RAISE EXCEPTION 'postflight: identity mapping conflict prevented alignment';
+  END IF;
 END $$;
 COMMIT;
 
