@@ -87,13 +87,15 @@ class OfflineContractTests(unittest.TestCase):
 
     def test_alarm_ack_first_occurrence(self):
         ack = {
-            "alarm_key": "NW-IT-RULE-S1:NW-IT-TH001:1",
+            "alarm_key": "ALARM-DOC-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High",
             "status": "New",
             "occurrence_count": 1,
             "changed": True,
             "duplicate": False,
         }
-        self.assertEqual(validate_alarm_ack(ack, expected_alarm_key="NW-IT-RULE-S1:NW-IT-TH001:1", is_duplicate=False), ack)
+        expected = {"kind": "occurrence", "device_id": "NW-IT-TH001", "severity": "High"}
+        self.assertEqual(validate_alarm_ack(ack, expected_payload=expected, is_duplicate=False), ack)
 
         # Mismatches fail
         with self.assertRaisesRegex(ValueError, "duplicate mismatch"):
@@ -101,12 +103,14 @@ class OfflineContractTests(unittest.TestCase):
 
     def test_alarm_ack_duplicate_retry(self):
         ack = {
-            "alarm_key": "NW-IT-RULE-S1:NW-IT-TH001:1",
+            "alarm_key": "ALARM-DOC-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High",
             "occurrence_count": 1,
             "changed": False,
-            "duplicate": True,
+            "duplicate": True, "replayed": True,
         }
-        self.assertEqual(validate_alarm_ack(ack, expected_alarm_key="NW-IT-RULE-S1:NW-IT-TH001:1", is_duplicate=True), ack)
+        expected = {"kind": "occurrence", "device_id": "NW-IT-TH001", "severity": "High"}
+        self.assertEqual(validate_alarm_ack(ack, expected_payload=expected, is_duplicate=True), ack)
 
         # Duplicate with changed=True is rejected as invalid ACK
         invalid_dup = copy.deepcopy(ack)

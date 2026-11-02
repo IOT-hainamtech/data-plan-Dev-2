@@ -180,7 +180,7 @@ Khi sẵn sàng mở kết nối công khai để Dev 1 gọi vào Staging Dev 2
 
 Để tránh làm sai lệch dữ liệu quản trị trên Dev 1, kiểm thử POST thực tế chỉ được kích hoạt khi:
 1. Dev 1 đã chốt schema và trả lời mẫu ACK cho `receive_status` (IF-04).
-2. Dev 1 đã sẵn sàng endpoint `POST /api/method/nextgrp.nextgrp_iot.controller.alarm_controller.receive_alarm` nhận form-urlencoded với trường `payload` là chuỗi JSON.
+2. Dev 1 đã xác nhận endpoint `POST /api/method/nextgrp.nextgrp_iot.controller.alarm_controller.receive_alarm` nhận JSON body `{"payload": {...}}`.
 3. Dev 1 cung cấp URL HTTPS và cặp `API_KEY:API_SECRET` mới của Frappe v15.
 4. Đặt biến môi trường double opt-in rõ ràng trước khi chạy runner:
    ```bash
@@ -200,7 +200,7 @@ Khi sẵn sàng mở kết nối công khai để Dev 1 gọi vào Staging Dev 2
 | :--- | :--- | :--- | :---: | :---: | :--- |
 | **Dev 2 → Dev 1** | Get Config | `config_controller.get_device_config` | `GET` | **READY** | Query param `device_id`. Hỗ trợ S1/S6. |
 | **Dev 2 → Dev 1** | Receive Status | `status_controller.receive_status` | `POST` | **PARTIAL / FAIL-CLOSED** | Transport form-urlencoded sẵn sàng. ACK schema chưa có xác nhận từ Dev 1. |
-| **Dev 2 → Dev 1** | Receive Alarm | `alarm_controller.receive_alarm` | `POST` | **READY** | Form field `payload` chứa JSON string. Hỗ trợ occurrence, duplicate retry, cleared. |
+| **Dev 2 → Dev 1** | Receive Alarm | `alarm_controller.receive_alarm` | `POST` | **BLOCKED** | JSON wrapper `payload`; chờ mapping, Rule version, credentials và one-shot approval. |
 | **Dev 2 → Dev 1** | Command Claim | `command_controller.claim_command` | `POST` | **PARTIAL** | Transport sẵn sàng. Chưa chốt payload cho S1/S6. |
 | **Dev 2 → Dev 1** | Command ACK | `command_controller.ack_command` | `POST` | **PARTIAL** | Transport sẵn sàng. Chưa chốt payload cho S1/S6. |
 | **Dev 1 → Dev 2** | Sync Org | `/api/v1/sync/organizations/{org_code}` | `PUT` | **READY** | Bearer auth + X-Org-Code. Đơn điệu phiên bản, duplicate detection. |

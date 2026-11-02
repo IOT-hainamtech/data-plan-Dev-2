@@ -26,7 +26,10 @@ class MappingCursor:
         self.rows = rows
         self.key = None
     def execute(self, sql, args):
-        self.key = (args[1], args[2]) if len(args) >= 3 else None
+        if "FROM rule_definitions" in sql:
+            self.key = ("RUNTIME", args[0])
+        else:
+            self.key = (args[1], args[2]) if len(args) >= 3 else None
     def fetchone(self):
         return self.rows.get(self.key)
 
@@ -92,6 +95,7 @@ class Dev1ConfigTests(unittest.TestCase):
 
     def test_alarm_mapping_uses_confirmed_ids_and_rule_version(self):
         cur = MappingCursor({
+            ("RUNTIME", "S1_TEMP_HIGH"): (1, {"auto_close": True}),
             ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
             ("DEVICE", "TH-001"): ("NW-LOCAL-TH001", 1),
             ("RULE", "S1_TEMP_HIGH"): ("NW-LOCAL-RULE-S1", 1),
@@ -99,7 +103,7 @@ class Dev1ConfigTests(unittest.TestCase):
         })
         mapped = map_alarm_payload(cur, {
             "org_code": "demo", "device_id": "TH-001", "rule_id": "S1_TEMP_HIGH",
-            "rule_version": 99, "zone_code": "LAB",
+            "rule_version": 1, "zone_code": "LAB",
             "episode_start": "2026-10-30T03:00:00Z", "alarm_key": "internal",
             "episode_key": "internal",
         })
@@ -109,6 +113,51 @@ class Dev1ConfigTests(unittest.TestCase):
         self.assertEqual(mapped["alarm_key"],
                          "NW-LOCAL-RULE-S1:NW-LOCAL-TH001:1793329200")
         self.assertEqual(mapped["episode_key"], mapped["alarm_key"])
+
+    def test_alarm_mapping_refuses_version_rewrite(self):
+        rows = {
+            ("RUNTIME", "S1_TEMP_HIGH"): (1, {"auto_close": False}),
+            ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
+            ("DEVICE", "TH-001"): ("NW-LOCAL-TH001", 1),
+            ("RULE", "S1_TEMP_HIGH"): ("NW-LOCAL-RULE-S1", 2),
+        }
+        base = {"org_code": "demo", "device_id": "TH-001", "rule_id": "S1_TEMP_HIGH",
+            "rule_version": 1, "kind": "occurrence", "episode_start": "2026-10-30T03:00:00Z",
+            "alarm_key": "internal", "episode_key": "internal"}
+        with self.assertRaisesRegex(ValueError, "versions must match"):
+            map_alarm_payload(MappingCursor(rows), base)
+
+    def test_cleared_is_delivered_independently_of_auto_close(self):
+        for runtime_config in ({"auto_close": True}, {"auto_close": False}, {}):
+            with self.subTest(runtime_config=runtime_config):
+                rows = {
+                    ("RUNTIME", "S1_TEMP_HIGH"): (1, runtime_config),
+                    ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
+                    ("DEVICE", "TH-001"): ("NW-LOCAL-TH001", 1),
+                    ("RULE", "S1_TEMP_HIGH"): ("NW-LOCAL-RULE-S1", 1),
+                }
+                mapped = map_alarm_payload(MappingCursor(rows), {
+                    "org_code": "demo", "device_id": "TH-001", "rule_id": "S1_TEMP_HIGH",
+                    "rule_version": 1, "kind": "cleared",
+                    "episode_start": "2026-10-30T03:00:00Z", "alarm_key": "internal",
+                    "episode_key": "internal", "event": {"event_id": "source-1",
+                        "event_type": "old", "data": {}}})
+                self.assertEqual(mapped["kind"], "cleared")
+                self.assertEqual(mapped["event"]["event_type"], "TEMP_NORMAL")
+
+    def test_s6_cleared_remains_blocked_without_confirmed_event_type(self):
+        rows = {
+            ("RUNTIME", "S6_DOOR_OPEN"): (1, {"auto_close": True}),
+            ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
+            ("DEVICE", "DR-001"): ("NW-LOCAL-DR001", 1),
+            ("RULE", "S6_DOOR_OPEN"): ("NW-LOCAL-RULE-S6", 1),
+        }
+        payload = {"org_code": "demo", "device_id": "DR-001", "rule_id": "S6_DOOR_OPEN",
+            "rule_version": 1, "kind": "cleared", "episode_start": "2026-10-30T03:00:00Z",
+            "alarm_key": "internal", "episode_key": "internal",
+            "event": {"event_id": "source-1", "event_type": "DOOR_CLOSED", "data": {}}}
+        with self.assertRaisesRegex(ValueError, "event_type is not confirmed"):
+            map_alarm_payload(MappingCursor(rows), payload)
 
     def test_external_callback_key_resolves_only_from_frozen_outbound_mapping(self):
         self.assertEqual(resolve_internal_alarm_key(
@@ -122,6 +171,7 @@ class Dev1ConfigTests(unittest.TestCase):
 
     def test_alarm_mapping_never_guesses_unconfirmed_s6_device(self):
         cur = MappingCursor({
+            ("RUNTIME", "S6_DOOR_OPEN"): (1, {"auto_close": False}),
             ("ORGANIZATION", "demo"): ("NW-LOCAL", 1),
         })
         with self.assertRaisesRegex(LookupError, "DEVICE"):

@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 from integrations.nextgrp import DeliveryResult, FrappeAlarmAdapter, NextGrpAdapter
 from outbox.worker import (OutboxStore, OutboxWorker, alarm_adapter, bridge_settings,
-                           delivery_not_before, retry_delay, validate_ack)
+                           approved_delivery_selector, delivery_not_before,
+                           retry_delay, validate_ack)
 
 
 class FakeStore:
@@ -68,6 +69,35 @@ class OutboxUnitTests(unittest.TestCase):
         OutboxStore(lambda: status_conn, table="status_outbox", key_column="device_id").claim(
             "w", 2, 30, datetime(2035, 1, 1))
         self.assertNotIn("wire_alarm_key", status_conn.cursor_value.sql)
+
+    def test_exact_if05_selector_is_fail_closed(self):
+        with patch.dict(os.environ, {"IF05_APPROVED_OUTBOX_IDS": "949,950",
+                "IF05_APPROVED_ORG": "hainam", "IF05_APPROVED_DEVICE": "TH-001",
+                "IF05_APPROVED_RULE": "S1_TEMP_HIGH", "IF05_RUN_ONCE": "true"}, clear=True):
+            ids, values = approved_delivery_selector()
+            self.assertEqual(ids, (949, 950))
+            self.assertEqual(values["IF05_APPROVED_ORG"], "hainam")
+        with patch.dict(os.environ, {"IF05_APPROVED_OUTBOX_IDS": "949"}, clear=True):
+            with self.assertRaises(ValueError):
+                approved_delivery_selector()
+
+    def test_production_transient_retry_has_no_attempt_ceiling(self):
+        store = FakeStore([(1, "alarm-1", {"alarm_key": "alarm-1"}, 99)])
+        worker = OutboxWorker(store, FakeAdapter(error=TimeoutError("timeout")),
+                              worker_id="w", max_attempts=None)
+        worker.run_once(datetime(2035, 1, 1))
+        self.assertIsNone(store.failures[0][0][6])
+        self.assertFalse(store.failures[0][1]["force_terminal"])
+
+    def test_claim_selector_filters_id_tenant_device_and_rule(self):
+        conn = CapturingConnection()
+        OutboxStore(lambda: conn, approved_ids=(949,), approved_org="hainam",
+            approved_device="TH-001", approved_rule="S1_TEMP_HIGH").claim(
+                "w", 1, 30, datetime(2035, 1, 1))
+        self.assertIn("id=ANY", conn.cursor_value.sql)
+        self.assertIn("payload_json->>'org_code'", conn.cursor_value.sql)
+        self.assertIn("payload_json->>'device_id'", conn.cursor_value.sql)
+        self.assertIn("payload_json->>'rule_id'", conn.cursor_value.sql)
 
     def test_real_mode_requires_real_urls_and_token(self):
         with patch.dict(os.environ, {"BRIDGE_MODE": "real",
@@ -140,7 +170,7 @@ class OutboxUnitTests(unittest.TestCase):
 
     def test_http_policy_matches_urd_for_every_relevant_status_class(self):
         for status, terminal in ((400, True), (401, True), (403, True), (404, True),
-                                 (408, False), (409, True), (415, True), (422, True),
+                                 (408, False), (409, True), (415, True), (417, True), (422, True),
                                  (429, False), (500, False), (503, False)):
             store = FakeStore([(1, "alarm-1", {"alarm_key": "alarm-1"}, 1)])
             adapter = FakeAdapter(DeliveryResult(status, {"detail": "test"}))
@@ -155,27 +185,30 @@ class OutboxUnitTests(unittest.TestCase):
                        allow_insecure_mock=True)
 
     def test_frappe_ack_and_duplicate_use_message_wrapper(self):
-        first = {"message": {"alarm_key": "wire-1", "kind": "occurrence",
-            "status": "New", "occurrence_count": 1, "changed": True,
-            "duplicate": False}}
-        duplicate = {"message": {"alarm_key": "wire-1", "occurrence_count": 1,
-            "changed": False, "duplicate": True}}
-        self.assertTrue(FrappeAlarmAdapter.validate_ack(first, "wire-1", "event-1"))
-        self.assertTrue(FrappeAlarmAdapter.validate_ack(duplicate, "wire-1", "event-1"))
+        payload = {"kind": "occurrence", "device_id": "NW-IT-TH001", "severity": "High"}
+        first = {"message": {"alarm_key": "ALARM-DOC-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High", "status": "New",
+            "occurrence_count": 1, "changed": True, "duplicate": False}}
+        duplicate = {"message": {**first["message"], "changed": False,
+            "duplicate": True, "replayed": True}}
+        self.assertTrue(FrappeAlarmAdapter.validate_ack(first, payload, "event-1"))
+        self.assertTrue(FrappeAlarmAdapter.validate_ack(duplicate, payload, "event-1"))
         self.assertFalse(FrappeAlarmAdapter.validate_ack(
             {"accepted": True, "alarm_key": "wire-1", "ack_id": "mock"},
             "wire-1", "event-1"))
 
     def test_frappe_success_uses_event_id_as_stable_receipt(self):
-        body = {"message": {"alarm_key": "wire-1", "status": "New",
+        body = {"message": {"alarm_key": "ALARM-DOC-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High", "status": "New",
             "occurrence_count": 1, "changed": True, "duplicate": False}}
         adapter = FakeAdapter(DeliveryResult(200, body))
         adapter.validate_ack = FrappeAlarmAdapter.validate_ack
         adapter.delivery_receipt = FrappeAlarmAdapter.delivery_receipt
         store = FakeStore([(1, "internal-1", {
-            "alarm_key": "wire-1", "event_id": "event-1"}, 1)])
+            "alarm_key": "wire-1", "event_id": "event-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High"}, 1)])
         OutboxWorker(store, adapter, worker_id="w").run_once(datetime(2035, 1, 1))
-        self.assertEqual(store.deliveries[0][2], "event-1")
+        self.assertEqual(store.deliveries[0][2], "ALARM-DOC-1")
         self.assertFalse(store.failures)
 
     def test_frappe_invalid_response_is_not_delivered(self):

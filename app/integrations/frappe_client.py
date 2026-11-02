@@ -91,18 +91,25 @@ class FrappeClient:
             raise ValueError("unknown Dev 1 method") from exc
         return self.base_url + METHOD_PREFIX + method
 
-    def _request(self, name, *, query=None, form=None):
+    def _request(self, name, *, query=None, form=None, json_body=None):
         url = self.method_url(name)
         if query:
             url += "?" + urllib.parse.urlencode(query)
-        data = None if form is None else urllib.parse.urlencode(form).encode("utf-8")
+        if form is not None and json_body is not None:
+            raise ValueError("request cannot contain both form and JSON bodies")
+        data = (json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+                if json_body is not None else
+                (None if form is None else urllib.parse.urlencode(form).encode("utf-8")))
         headers = {
             "Authorization": f"token {self.token}",
             "X-Frappe-Site-Name": self.site_name,
             "Accept": "application/json",
         }
         if data is not None:
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            headers["Content-Type"] = ("application/json" if json_body is not None
+                                       else "application/x-www-form-urlencoded")
+        if name == "alarm":
+            headers["ngrok-skip-browser-warning"] = "true"
         request = urllib.request.Request(url, data=data, headers=headers,
                                          method="GET" if data is None else "POST")
         context = ssl.create_default_context() if url.startswith("https://") else None
@@ -155,7 +162,7 @@ class FrappeClient:
                 raise ValueError(f"alarm payload missing required field '{req}'")
         if payload.get("kind") not in ("occurrence", "cleared"):
             raise ValueError("alarm kind must be 'occurrence' or 'cleared'")
-        return self._request("alarm", form={"payload": _json_payload(payload)})
+        return self._request("alarm", json_body={"payload": payload})
 
     def claim_command(self, device_id):
         if not device_id or any(c in str(device_id) for c in "\r\n"):

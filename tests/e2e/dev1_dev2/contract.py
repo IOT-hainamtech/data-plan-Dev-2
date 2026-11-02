@@ -133,12 +133,16 @@ def validate_alarm_payload(payload, expected_device_id):
     return payload
 
 
-def validate_alarm_ack(message, expected_alarm_key=None, is_duplicate=False):
+def validate_alarm_ack(message, expected_payload=None, is_duplicate=False):
     """Validate Dev 1's response.message for alarm_controller.receive_alarm."""
     if not isinstance(message, dict):
         raise ValueError("alarm ACK message must be a dictionary")
-    if expected_alarm_key and message.get("alarm_key") != expected_alarm_key:
-        raise ValueError("alarm_key in ACK does not match expected")
+    if not isinstance(message.get("alarm_key"), str) or not message["alarm_key"]:
+        raise ValueError("ACK alarm_key document name is required")
+    if isinstance(expected_payload, dict):
+        for field in ("kind", "device_id", "severity"):
+            if message.get(field) != expected_payload.get(field):
+                raise ValueError(f"ACK {field} does not match payload")
     duplicate = message.get("duplicate")
     if not isinstance(duplicate, bool):
         raise ValueError("ACK duplicate field must be boolean")
@@ -147,6 +151,8 @@ def validate_alarm_ack(message, expected_alarm_key=None, is_duplicate=False):
     if duplicate is True:
         if message.get("changed") is not False:
             raise ValueError("duplicate alarm ACK must have changed=False")
+        if message.get("replayed") is not True:
+            raise ValueError("duplicate alarm ACK must have replayed=True")
     else:
         if message.get("changed") is not True:
             raise ValueError("first occurrence alarm ACK must have changed=True")

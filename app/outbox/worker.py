@@ -37,11 +37,16 @@ def validate_ack(body, alarm_key, event_id=None):
 
 class OutboxStore:
     def __init__(self, connection_factory=db_connection, alarm_key=None,
-                 table="alarm_outbox", key_column="alarm_key", not_before=None):
+                 table="alarm_outbox", key_column="alarm_key", not_before=None,
+                 approved_ids=None, approved_org=None, approved_device=None,
+                 approved_rule=None):
         self.connection_factory = connection_factory
         self.alarm_key = alarm_key
         self.table, self.key_column = table, key_column
         self.not_before = not_before
+        self.approved_ids = tuple(approved_ids or ())
+        self.approved_org, self.approved_device = approved_org, approved_device
+        self.approved_rule = approved_rule
 
     def claim(self, worker_id, batch_size, lease_seconds, at):
         filters = ""
@@ -52,6 +57,15 @@ class OutboxStore:
         if self.alarm_key:
             filters += f" AND {self.key_column}=%s"
             params.append(self.alarm_key)
+        if self.approved_ids:
+            filters += " AND id=ANY(%s)"
+            params.append(list(self.approved_ids))
+        for field, value in (("org_code", self.approved_org),
+                             ("device_id", self.approved_device),
+                             ("rule_id", self.approved_rule)):
+            if value:
+                filters += f" AND payload_json->>'{field}'=%s"
+                params.append(value)
         ordering_guard = ""
         if self.table == "alarm_outbox":
             ordering_guard = """AND NOT (payload_json->>'kind'='cleared' AND EXISTS (
@@ -165,7 +179,10 @@ class OutboxWorker:
                 expected_alarm=payload.get("alarm_key",str(alarm_key)) if isinstance(payload,dict) else str(alarm_key)
                 status_ok = status == 202 if getattr(self.adapter,"require_202",False) else 200 <= status < 300
                 ack_validator = getattr(self.adapter, "validate_ack", validate_ack)
-                if not status_ok or not ack_validator(result.body, expected_alarm, event_id):
+                frappe_ack = (isinstance(self.adapter, FrappeAlarmAdapter)
+                              or ack_validator is FrappeAlarmAdapter.validate_ack)
+                ack_expected = payload if frappe_ack else expected_alarm
+                if not status_ok or not ack_validator(result.body, ack_expected, event_id):
                     raise ValueError(f"invalid ACK (HTTP {status})")
                 receipt = (self.adapter.delivery_receipt(result.body, expected_alarm, event_id)
                            if hasattr(self.adapter, "delivery_receipt") else result.body["ack_id"])
@@ -231,11 +248,29 @@ def delivery_not_before():
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def approved_delivery_selector():
+    raw = os.getenv("IF05_APPROVED_OUTBOX_IDS", "").strip()
+    if not raw:
+        return None
+    try:
+        ids = tuple(sorted({int(item.strip()) for item in raw.split(",") if item.strip()}))
+    except ValueError as exc:
+        raise ValueError("IF05_APPROVED_OUTBOX_IDS must contain integers") from exc
+    if not ids or any(item <= 0 for item in ids):
+        raise ValueError("IF05 approved Outbox IDs must be positive")
+    values = {name: os.getenv(name, "").strip() for name in
+              ("IF05_APPROVED_ORG", "IF05_APPROVED_DEVICE", "IF05_APPROVED_RULE")}
+    if not all(values.values()) or not _env_bool("IF05_RUN_ONCE"):
+        raise ValueError("exact IF-05 approval requires org, device, rule and IF05_RUN_ONCE=true")
+    return ids, values
+
+
 def main():
     if not _env_bool("OUTBOX_DELIVERY_ENABLED"):
         raise SystemExit("OUTBOX_DELIVERY_ENABLED is false; refusing external delivery")
     mode, alarm_url, status_url, token = bridge_settings()
     not_before = delivery_not_before()
+    selector = approved_delivery_selector()
     allow_http = _env_bool("BRIDGE_ALLOW_INSECURE_HTTP",
                            _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"))
     adapter = alarm_adapter(mode, alarm_url, token,
@@ -246,21 +281,35 @@ def main():
             with db_connection() as conn:
                 with conn.cursor() as cur:
                     return map_alarm_payload(cur, payload)
+    store_options = {"not_before": not_before}
+    if selector:
+        ids, values = selector
+        store_options.update({"approved_ids": ids, "approved_org": values["IF05_APPROVED_ORG"],
+            "approved_device": values["IF05_APPROVED_DEVICE"],
+            "approved_rule": values["IF05_APPROVED_RULE"]})
     worker = OutboxWorker(
-        OutboxStore(not_before=not_before), adapter, batch_size=int(os.getenv("OUTBOX_BATCH_SIZE", "20")),
+        OutboxStore(**store_options), adapter,
+        batch_size=len(selector[0]) if selector else int(os.getenv("OUTBOX_BATCH_SIZE", "20")),
         lease_seconds=int(os.getenv("OUTBOX_LEASE_SECONDS", "60")),
+        # Transient failures remain durable. A one-shot process exits after this
+        # run_once call, limiting attempts without converting the row to FAILED.
         max_attempts=None,
         base_seconds=float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS", "1")),
         max_seconds=float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS", "60")),
         jitter_ratio=float(os.getenv("OUTBOX_BACKOFF_JITTER", "0.2")),
         payload_transform=payload_transform)
+    if selector:
+        processed = worker.run_once()
+        LOG.info("IF05_APPROVED_RUN_COMPLETE selected=%d processed=%d", len(selector[0]), processed)
+        return
     status_adapter = NextGrpAdapter(
         status_url, float(os.getenv("BRIDGE_TIMEOUT_SECONDS","5")),"bearer",token,
         allow_insecure_mock=allow_http,require_202=_env_bool("BRIDGE_REQUIRE_202",True))
     status_worker = OutboxWorker(OutboxStore(table="status_outbox",key_column="delivery_event_id",
         not_before=not_before),status_adapter,
         batch_size=int(os.getenv("OUTBOX_BATCH_SIZE","20")),lease_seconds=int(os.getenv("OUTBOX_LEASE_SECONDS","60")),
-        max_attempts=None,base_seconds=float(os.getenv("STATUS_OUTBOX_BACKOFF_BASE_SECONDS","1")),
+        max_attempts=None,
+        base_seconds=float(os.getenv("STATUS_OUTBOX_BACKOFF_BASE_SECONDS","1")),
         max_seconds=float(os.getenv("STATUS_OUTBOX_BACKOFF_MAX_SECONDS","60")),
         jitter_ratio=float(os.getenv("STATUS_OUTBOX_BACKOFF_JITTER","0.2")))
     if isinstance(adapter, FrappeAlarmAdapter):

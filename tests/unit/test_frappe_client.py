@@ -128,7 +128,7 @@ class FrappeClientTests(unittest.TestCase):
     # POST Alarm
     # -------------------------------------------------------------------------
 
-    def test_alarm_is_form_encoded_payload_json(self):
+    def test_alarm_is_json_wrapped_payload(self):
         recorder = Recorder(Response(200, {"message": {"accepted": True}}))
         payload = {
             "event_id": "evt-1",
@@ -140,10 +140,11 @@ class FrappeClientTests(unittest.TestCase):
         self.client(recorder).post_alarm(payload)
         request, _ = recorder.requests[-1]
         self.assertIn(METHOD_PREFIX + "alarm_controller.receive_alarm", request.full_url)
-        parsed = json.loads(urllib.parse.parse_qs(request.data.decode())["payload"][0])
+        parsed = json.loads(request.data.decode())["payload"]
         self.assertEqual(parsed["device_id"], "NW-IT-TH001")
         self.assertEqual(parsed["event_id"], "evt-1")
-        self.assertEqual(request.get_header("Content-type"), "application/x-www-form-urlencoded")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(request.get_header("Ngrok-skip-browser-warning"), "true")
 
     def test_alarm_retry_retains_identical_payload(self):
         recorder = Recorder(Response(200, {"message": {"duplicate": True}}))

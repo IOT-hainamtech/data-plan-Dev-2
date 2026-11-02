@@ -10,7 +10,7 @@ runner never reads `.env` and never prints the service token.
 |---|---|---|---|---|
 | Config | `GET /api/method/nextgrp.nextgrp_iot.controller.config_controller.get_device_config?device_id=...` | query string | JSON `message`; `Authorization: token API_KEY:API_SECRET`; site header | READY for read-only |
 | Status | `POST ...status_controller.receive_status` | form `device_id`, `state` | JSON `message`; exact ACK schema unconfirmed | PARTIAL/fail-closed; no send |
-| Alarm | `POST ...alarm_controller.receive_alarm` | form `payload=JSON_STRING` | JSON `message`; Outbox retains stable `event_id` | READY for approved staging |
+| Alarm | `POST ...alarm_controller.receive_alarm` | JSON `{"payload": {...}}` | JSON `message`; Outbox retains stable `event_id` | BLOCKED until mapping/version/credentials are verified |
 | Command claim | `POST ...command_controller.claim_command` | form `device_id` | JSON `message` | BLOCKED for demo S1/S6 |
 | Command ACK | `POST ...command_controller.ack_command` | form `command_id`, `delivery_token`, `status`, `result_json` | JSON `message` | BLOCKED for demo S1/S6 |
 | IF-06 callback | Dev 2 `POST /api/v1/alarms/{alarm_key}/state` | JSON plus Bearer and `X-Org-Code` | Dev 2 applied/duplicate response | Dev 2 READY; Dev 1 BLOCKED |

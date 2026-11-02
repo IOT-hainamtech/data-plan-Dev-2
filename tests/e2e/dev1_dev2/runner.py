@@ -38,23 +38,26 @@ def offline_report():
     results.append(_result("envelope", "frappe response.message", "PASS"))
 
     sample_ack = {
-        "alarm_key": "test:key:1",
+        "alarm_key": "ALARM-DOC-1",
         "kind": "occurrence",
+        "device_id": "NW-IT-TH001", "severity": "High",
         "status": "New",
         "occurrence_count": 1,
         "changed": True,
         "duplicate": False
     }
-    validate_alarm_ack(sample_ack, expected_alarm_key="test:key:1", is_duplicate=False)
+    expected = {"kind": "occurrence", "device_id": "NW-IT-TH001", "severity": "High"}
+    validate_alarm_ack(sample_ack, expected_payload=expected, is_duplicate=False)
     results.append(_result("alarm_ack", "occurrence ACK validation", "PASS"))
 
     sample_dup_ack = {
-        "alarm_key": "test:key:1",
+        **sample_ack,
         "occurrence_count": 1,
         "changed": False,
-        "duplicate": True
+        "duplicate": True,
+        "replayed": True
     }
-    validate_alarm_ack(sample_dup_ack, expected_alarm_key="test:key:1", is_duplicate=True)
+    validate_alarm_ack(sample_dup_ack, expected_payload=expected, is_duplicate=True)
     results.append(_result("alarm_ack", "duplicate ACK validation", "PASS"))
 
     for fixture in fixtures():
@@ -145,7 +148,7 @@ def _result(subject, test, status, detail=""):
 
 
 def _alarm_result(device, test, response, payload):
-    valid = FrappeAlarmAdapter.validate_ack(response.envelope, payload["alarm_key"],
+    valid = FrappeAlarmAdapter.validate_ack(response.envelope, payload,
                                             payload["event_id"])
     return _result(device, test, "PASS" if valid else "FAIL",
                    f"HTTP {response.status}; Frappe message ACK {'valid' if valid else 'invalid'}")

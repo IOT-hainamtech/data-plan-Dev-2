@@ -223,17 +223,34 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
         prior = cur.fetchone()
     if prior:
         frozen = prior[0]
+        cur.execute("""SELECT config_version,config_json FROM rule_definitions
+            WHERE rule_code=%s AND enabled=TRUE""", (payload["rule_id"],))
+        runtime_rule = cur.fetchone()
+        if not runtime_rule:
+            raise LookupError("enabled runtime Rule is missing")
+        runtime_version, runtime_config = runtime_rule
+        if (payload.get("rule_version") != runtime_version
+                or frozen.get("rule_version") != runtime_version):
+            raise ValueError("runtime, cleared payload and frozen occurrence Rule versions must match")
         mapped = deepcopy(payload)
         mapped.update({key: frozen.get(key) for key in
             ("org_code", "device_id", "rule_id", "rule_version", "zone_code",
              "alarm_key", "episode_key")})
         return mapped
     mapped = deepcopy(payload)
+    cur.execute("""SELECT config_version,config_json FROM rule_definitions
+        WHERE rule_code=%s AND enabled=TRUE""", (payload["rule_id"],))
+    runtime_rule = cur.fetchone()
+    if not runtime_rule:
+        raise LookupError("enabled runtime Rule is missing")
+    runtime_version, runtime_config = runtime_rule
     org, _ = resolve_confirmed_mapping(cur, "ORGANIZATION", payload["org_code"], system_code)
     device, _ = resolve_confirmed_mapping(cur, "DEVICE", payload["device_id"], system_code)
     rule, rule_version = resolve_confirmed_mapping(cur, "RULE", payload["rule_id"], system_code)
     if rule_version < 1:
         raise ValueError("confirmed Rule mapping must carry Dev 1 version >= 1")
+    if payload.get("rule_version") != runtime_version or runtime_version != rule_version:
+        raise ValueError("runtime, frozen payload and confirmed Dev 1 Rule versions must match")
     zone = payload.get("zone_code")
     if zone:
         zone, _ = resolve_confirmed_mapping(cur, "ZONE", zone, system_code)
@@ -243,4 +260,15 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
     mapped.update({"org_code": org, "device_id": device, "rule_id": rule,
                    "rule_version": rule_version, "zone_code": zone,
                    "alarm_key": external_key, "episode_key": external_key})
+    mapped.pop("site_code", None)
+    if mapped.get("event"):
+        event_types = {
+            ("S1_TEMP_HIGH", "occurrence"): "TEMP_HIGH",
+            ("S1_TEMP_HIGH", "cleared"): "TEMP_NORMAL",
+            ("S6_DOOR_OPEN", "occurrence"): "DOOR_OPENED",
+        }
+        event_type = event_types.get((payload["rule_id"], payload.get("kind")))
+        if event_type is None:
+            raise ValueError("Dev 1 event_type is not confirmed for this Rule transition")
+        mapped["event"]["event_type"] = event_type
     return mapped

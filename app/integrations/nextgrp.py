@@ -76,13 +76,13 @@ class FrappeAlarmAdapter:
         return f"<FrappeAlarmAdapter url={self.url!r} site={self.site_name!r}>"
 
     def send(self, alarm_key, payload):
-        encoded_json = json.dumps(payload, separators=(",", ":"))
-        body = urllib.parse.urlencode({"payload": encoded_json}).encode("ascii")
+        body = json.dumps({"payload": payload}, separators=(",", ":")).encode("utf-8")
         request = urllib.request.Request(self.url, data=body, method="POST", headers={
             "Authorization": f"token {self.token}",
             "X-Frappe-Site-Name": self.site_name,
+            "ngrok-skip-browser-warning": "true",
             "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
         })
         context = ssl.create_default_context() if self.url.startswith("https://") else None
         try:
@@ -97,21 +97,30 @@ class FrappeAlarmAdapter:
         return DeliveryResult(status=status, body=parsed)
 
     @staticmethod
-    def validate_ack(body, alarm_key, event_id=None):
+    def validate_ack(body, expected, event_id=None):
         """Validate Frappe's ``message`` response, never the Mock ACK shape."""
         if not isinstance(body, dict) or not isinstance(body.get("message"), dict):
             return False
         message = body["message"]
-        if message.get("alarm_key") != alarm_key:
+        if not isinstance(message.get("alarm_key"), str) or not message["alarm_key"]:
             return False
+        payload = expected if isinstance(expected, dict) else None
+        if payload is not None:
+            for field in ("kind", "device_id", "severity"):
+                if message.get(field) != payload.get(field):
+                    return False
+            if payload.get("kind") == "cleared" and not message.get("cleared_at"):
+                return False
         duplicate = message.get("duplicate")
         if duplicate is True:
-            return message.get("changed") is False
+            return message.get("changed") is False and message.get("replayed") is True
         return (duplicate is False and message.get("changed") is True
                 and isinstance(message.get("status"), str)
-                and isinstance(message.get("occurrence_count"), int))
+                and isinstance(message.get("occurrence_count"), int)
+                and not isinstance(message.get("occurrence_count"), bool)
+                and message["occurrence_count"] >= 1)
 
     @staticmethod
     def delivery_receipt(body, alarm_key, event_id=None):
-        # Dev 1 has no ack_id. Persist the stable outbound event_id as correlation receipt.
-        return event_id
+        # ACK alarm_key is the durable nextGRP Alarm document name, not the sent episode key.
+        return body.get("message", {}).get("alarm_key")

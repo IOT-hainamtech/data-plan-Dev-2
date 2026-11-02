@@ -44,17 +44,18 @@ class FrappeAdapterTests(unittest.TestCase):
         return FrappeAlarmAdapter("https://nextgrp.test/api/method/receive_alarm", 5,
             "api-key:api-secret", "nextgrp.localhost", opener=opener)
 
-    def test_request_is_form_encoded_with_token_and_site_headers(self):
-        response = {"message": {"alarm_key": "alarm-1", "status": "New",
+    def test_request_is_json_with_token_site_and_ngrok_headers(self):
+        response = {"message": {"alarm_key": "ALARM-DOC-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High", "status": "New",
             "occurrence_count": 1, "changed": True, "duplicate": False}}
         opener = RecordingOpener(FakeResponse(200, response))
         result = self.adapter(opener).send("alarm-1", self.payload())
         request, options = opener.calls[0]
-        form = urllib.parse.parse_qs(request.data.decode())
-        self.assertEqual(json.loads(form["payload"][0]), self.payload())
+        self.assertEqual(json.loads(request.data.decode()), {"payload": self.payload()})
         self.assertEqual(request.get_header("Authorization"), "token api-key:api-secret")
         self.assertEqual(request.get_header("X-frappe-site-name"), "nextgrp.localhost")
-        self.assertEqual(request.get_header("Content-type"), "application/x-www-form-urlencoded")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(request.get_header("Ngrok-skip-browser-warning"), "true")
         self.assertEqual(request.get_header("Accept"), "application/json")
         self.assertEqual(options["timeout"], 5)
         self.assertEqual(result.body, response)
@@ -100,29 +101,31 @@ class FrappeAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.api_secret, "my-secret")
 
     def test_validate_ack_occurrence_and_duplicate(self):
-        occurrence_body = {"message": {"alarm_key": "alarm-1", "status": "New",
-                                       "occurrence_count": 1, "changed": True, "duplicate": False}}
-        self.assertTrue(FrappeAlarmAdapter.validate_ack(occurrence_body, "alarm-1", "evt-1"))
+        payload = {**self.payload(), "device_id": "NW-IT-TH001", "severity": "High"}
+        occurrence_body = {"message": {"alarm_key": "ALARM-DOC-1", "kind": "occurrence",
+            "device_id": "NW-IT-TH001", "severity": "High", "status": "New",
+            "occurrence_count": 1, "changed": True, "duplicate": False}}
+        self.assertTrue(FrappeAlarmAdapter.validate_ack(occurrence_body, payload, "evt-1"))
 
-        dup_body = {"message": {"alarm_key": "alarm-1", "occurrence_count": 1,
-                                "changed": False, "duplicate": True}}
-        self.assertTrue(FrappeAlarmAdapter.validate_ack(dup_body, "alarm-1", "evt-1"))
+        dup_body = {"message": {**occurrence_body["message"], "changed": False,
+            "duplicate": True, "replayed": True}}
+        self.assertTrue(FrappeAlarmAdapter.validate_ack(dup_body, payload, "evt-1"))
 
         # Inconsistent duplicate with changed=True
-        invalid_dup = {"message": {"alarm_key": "alarm-1", "occurrence_count": 1,
-                                   "changed": True, "duplicate": True}}
-        self.assertFalse(FrappeAlarmAdapter.validate_ack(invalid_dup, "alarm-1", "evt-1"))
+        invalid_dup = {"message": {**dup_body["message"], "changed": True}}
+        self.assertFalse(FrappeAlarmAdapter.validate_ack(invalid_dup, payload, "evt-1"))
 
-        # Mismatch alarm_key
-        self.assertFalse(FrappeAlarmAdapter.validate_ack(occurrence_body, "wrong-key", "evt-1"))
+        wrong_device = {"message": {**occurrence_body["message"], "device_id": "OTHER"}}
+        self.assertFalse(FrappeAlarmAdapter.validate_ack(wrong_device, payload, "evt-1"))
 
         # Missing or non-dict message
         self.assertFalse(FrappeAlarmAdapter.validate_ack({}, "alarm-1", "evt-1"))
         self.assertFalse(FrappeAlarmAdapter.validate_ack({"message": "string"}, "alarm-1", "evt-1"))
 
     def test_delivery_receipt_preserves_event_id(self):
-        receipt = FrappeAlarmAdapter.delivery_receipt({"message": {}}, "alarm-1", "evt-100")
-        self.assertEqual(receipt, "evt-100")
+        receipt = FrappeAlarmAdapter.delivery_receipt(
+            {"message": {"alarm_key": "ALARM-DOC-1"}}, "episode-1", "evt-100")
+        self.assertEqual(receipt, "ALARM-DOC-1")
 
 
 if __name__ == "__main__":

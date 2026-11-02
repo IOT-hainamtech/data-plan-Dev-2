@@ -97,7 +97,7 @@ Trước khi hết usage limit, Codex đã:
 |---|---|---|---|---|---|---|
 | 1 | `config_controller.get_device_config` | Dev 2 → Dev 1 | GET `?device_id=...` | `{"message": ...}` / `token KEY:SECRET` | **READY** | Sẵn sàng chạy read-only khi Dev 1 cấp token và mở LAN port 8000 |
 | 2 | `status_controller.receive_status` | Dev 2 → Dev 1 | POST form: `device_id`, `state` | `{"message": ...}` | **PARTIAL (Fail-Closed)** | Transport đã sẵn sàng; Dev 1 chưa chốt schema ACK (IF-04) nên không gửi tự động trong background |
-| 3 | `alarm_controller.receive_alarm` | Dev 2 → Dev 1 | POST form: `payload=JSON_STRING` | `{"message": {"alarm_key":..., "duplicate":...}}` | **READY (Staging)** | Sẵn sàng cho staging POST khi được phê duyệt |
+| 3 | `alarm_controller.receive_alarm` | Dev 2 → Dev 1 | POST JSON: `{"payload": {...}}` | `{"message": {"alarm_key":..., "duplicate":...}}` | **BLOCKED** | Chờ mapping/version/credentials và phê duyệt exact Outbox ID |
 | 4 | `command_controller.claim_command` | Dev 2 → Dev 1 | POST form: `device_id` | `{"message": {"command": ...}}` | **BLOCKED (Demo scope)** | Endpoint transport sẵn sàng; tạm không triển khai runtime execution trong demo S1/S6 |
 | 5 | `command_controller.ack_command` | Dev 2 → Dev 1 | POST form: `command_id`, `delivery_token`, `status`, `result_json` | `{"message": {"status": ...}}` | **BLOCKED (Demo scope)** | Endpoint transport sẵn sàng; chờ lệnh điều khiển thực tế |
 | 6 | Dev 2 `PUT /api/v1/sync/...` (Config) | Dev 1 → Dev 2 | PUT JSON: Org, Site, Zone, Profile, Device, Rule | `{"status": "applied"/"duplicate"}` / Bearer token | **READY (Dev 2)** | Dev 2 đã có API v1.3; Dev 1 chưa phát triển tính năng push config |
@@ -114,7 +114,7 @@ Tất cả các bộ kiểm thử đã được chạy và xác nhận 100% PASS
 ```
 Ran 68 tests in 0.162s — OK
 - test_frappe_client: 21 PASS (auth pair, headers, config, status, alarm, claim, ack, HTTP retryable/terminal errors)
-- test_frappe_adapter: 8 PASS (fail-closed auth, form payload, ACK validation, receipt)
+- test_frappe_adapter: PASS (fail-closed auth, JSON payload, ACK validation, nextGRP document receipt)
 - test_dev1_config: 9 PASS (client fetch, identity mappings, alarm mapping, schedule mapping)
 - test_outbox_worker, test_rule_engine, test_snapshot_worker, test_status_reconciliation, security: 30 PASS
 ```
