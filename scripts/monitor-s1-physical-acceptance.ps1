@@ -7,7 +7,8 @@ param(
     [ValidateRange(1, 180)][int]$DurationMinutes = 20,
     [long]$BaselineOccurrenceId = -1,
     [string]$ReportPath,
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [switch]$FormatSelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +26,30 @@ function ConvertFrom-LocalSecureString([SecureString]$Value) {
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
     try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+}
+
+function Format-MonitorLine {
+    param($Latest, $Temperature, $Humidity, [string]$SeqMark,
+          [int]$AboveSeconds, [int]$BelowSeconds, [string]$RulePhase,
+          [int]$NewOccurrenceCount)
+    return (("{0}  T={1:N2}C H={2:N2}% seq={3} {4}/{5} age={6:N1}s " +
+        "{7} local>30={8}s local<29={9}s DB={10} new_occ={11}") -f
+        $Latest.measured_at_local,$Temperature,$Humidity,$Latest.seq,
+        $Latest.online_status,$Latest.data_status,$Latest.age_seconds,
+        $SeqMark,$AboveSeconds,$BelowSeconds,$RulePhase,$NewOccurrenceCount)
+}
+
+if ($FormatSelfTest) {
+    $sample = [pscustomobject]@{ measured_at_local='2026-10-31T16:40:34+07:00'; seq=42
+        online_status='online'; data_status='LIVE'; age_seconds=1.25 }
+    $line = Format-MonitorLine $sample 30.55 61.25 'SEQ-OK' 305 0 'ACTIVE' 1
+    if ($line -match '\{[0-9]' -or $line -notmatch 'T=30.55C' -or
+        $line -notmatch 'H=61.25%' -or $line -notmatch 'seq=42 online/LIVE' -or
+        $line -notmatch 'local>30=305s' -or $line -notmatch 'DB=ACTIVE new_occ=1') {
+        throw "Monitor output format self-test failed: $line"
+    }
+    Write-Host "Monitor output format self-test PASS: $line"
+    exit 0
 }
 
 function Invoke-ReadOnlySql {
@@ -186,11 +211,8 @@ try {
                      elseif ($runtime.recovery_started_at) { 'RECOVERY' } else { 'IDLE' }
         $seqMark = if ($null -ne $lastSeq -and $latest.seq -le $lastSeq) { 'SEQ-NOT-ADVANCING' } else { 'SEQ-OK' }
         $lastSeq = $latest.seq
-        Write-Host ("{0}  T={1:N2}C H={2:N2}% seq={3} {4}/{5} age={6:N1}s " +
-            "{7} local>30={8}s local<29={9}s DB={10} new_occ={11}" -f
-            $latest.measured_at_local,$temperature,$humidity,$latest.seq,
-            $latest.online_status,$latest.data_status,$latest.age_seconds,
-            $seqMark,$aboveSeconds,$belowSeconds,$rulePhase,@($final.occurrences).Count)
+        Write-Host (Format-MonitorLine $latest $temperature $humidity $seqMark `
+            $aboveSeconds $belowSeconds $rulePhase @($final.occurrences).Count)
         Start-Sleep -Seconds $PollSeconds
     }
 } finally {
