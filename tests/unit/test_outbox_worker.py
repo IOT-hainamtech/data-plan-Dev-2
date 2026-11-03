@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from integrations.nextgrp import DeliveryResult, FrappeAlarmAdapter, NextGrpAdapter
 from outbox.worker import (OutboxStore, OutboxWorker, alarm_adapter, bridge_settings,
-                           approved_delivery_selector, delivery_not_before,
+                           approved_delivery_selector, armed_e2e_selector, delivery_not_before,
                            retry_delay, validate_ack)
 
 
@@ -45,10 +45,10 @@ class FakeAdapter:
 
 
 class CapturingCursor:
-    def __init__(self): self.sql = ""
+    def __init__(self): self.sql, self.params = "", ()
     def __enter__(self): return self
     def __exit__(self, *args): pass
-    def execute(self, sql, params): self.sql = sql
+    def execute(self, sql, params): self.sql, self.params = sql, params
     def fetchall(self): return []
 
 
@@ -95,9 +95,57 @@ class OutboxUnitTests(unittest.TestCase):
             approved_device="TH-001", approved_rule="S1_TEMP_HIGH").claim(
                 "w", 1, 30, datetime(2035, 1, 1))
         self.assertIn("id=ANY", conn.cursor_value.sql)
-        self.assertIn("payload_json->>'org_code'", conn.cursor_value.sql)
-        self.assertIn("payload_json->>'device_id'", conn.cursor_value.sql)
-        self.assertIn("payload_json->>'rule_id'", conn.cursor_value.sql)
+        self.assertIn("approval_device.org_code", conn.cursor_value.sql)
+        self.assertIn("approval_occ.device_id", conn.cursor_value.sql)
+        self.assertIn("approval_occ.rule_code", conn.cursor_value.sql)
+        self.assertIn("approval_rule_map.config_version", conn.cursor_value.sql)
+        self.assertIn("approval_rule_map.confirmed=TRUE", conn.cursor_value.sql)
+
+    def test_armed_selector_requires_exact_physical_scope_and_watermark(self):
+        valid = {"IF05_E2E_ARMED": "true", "IF05_E2E_HIGH_WATER_ID": "956",
+            "IF05_E2E_ARMED_AT": "2026-11-03T02:00:00Z", "IF05_E2E_ORG": "hainam",
+            "IF05_E2E_DEVICES": "TH-001,DR-001",
+            "IF05_E2E_RULES": "S1_TEMP_HIGH,S6_DOOR_OPEN"}
+        with patch.dict(os.environ, valid, clear=True):
+            selector = armed_e2e_selector()
+            self.assertEqual(selector["high_water"], 956)
+            self.assertEqual(set(selector["devices"]), {"TH-001", "DR-001"})
+            self.assertEqual(selector["armed_at"], datetime(2026, 11, 3, 2, 0))
+        for name, value in (("IF05_E2E_HIGH_WATER_ID", ""),
+                            ("IF05_E2E_ORG", "demo"),
+                            ("IF05_E2E_DEVICES", "TH-001"),
+                            ("IF05_E2E_RULES", "S1_TEMP_HIGH")):
+            invalid = dict(valid)
+            invalid[name] = value
+            with patch.dict(os.environ, invalid, clear=True):
+                with self.assertRaises(ValueError):
+                    armed_e2e_selector()
+
+    def test_armed_claim_excludes_backlog_and_wrong_scope_using_immutable_rows(self):
+        conn = CapturingConnection()
+        OutboxStore(lambda: conn, min_id_exclusive=956,
+            not_before=datetime(2026, 11, 3, 2, 0), approved_org="hainam",
+            approved_devices=("TH-001", "DR-001"),
+            approved_rules=("S1_TEMP_HIGH", "S6_DOOR_OPEN")).claim(
+                "w", 20, 60, datetime(2026, 11, 3, 2, 1))
+        self.assertIn("id>%s", conn.cursor_value.sql)
+        self.assertIn("created_at >= %s", conn.cursor_value.sql)
+        self.assertIn("approval_occ.alarm_key=alarm_outbox.alarm_key", conn.cursor_value.sql)
+        self.assertNotIn("payload_json->>'org_code'", conn.cursor_value.sql)
+        self.assertIn(956, conn.cursor_value.params)
+
+    def test_armed_selector_rejects_fixed_ids_and_naive_time(self):
+        base = {"IF05_E2E_ARMED": "true", "IF05_E2E_HIGH_WATER_ID": "956",
+            "IF05_E2E_ARMED_AT": "2026-11-03T02:00:00Z", "IF05_E2E_ORG": "hainam",
+            "IF05_E2E_DEVICES": "TH-001,DR-001",
+            "IF05_E2E_RULES": "S1_TEMP_HIGH,S6_DOOR_OPEN"}
+        with patch.dict(os.environ, {**base, "IF05_APPROVED_OUTBOX_IDS": "956"}, clear=True):
+            with self.assertRaises(ValueError):
+                armed_e2e_selector()
+        with patch.dict(os.environ, {**base,
+                "IF05_E2E_ARMED_AT": "2026-11-03T02:00:00"}, clear=True):
+            with self.assertRaises(ValueError):
+                armed_e2e_selector()
 
     def test_real_mode_requires_real_urls_and_token(self):
         with patch.dict(os.environ, {"BRIDGE_MODE": "real",

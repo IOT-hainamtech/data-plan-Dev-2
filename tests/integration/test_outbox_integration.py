@@ -26,16 +26,33 @@ class OutboxDatabaseTests(unittest.TestCase):
         self.at = datetime(2035, 1, 1)
         with db_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT org_code FROM devices WHERE device_id='TH-001'")
+                self.org = cur.fetchone()[0]
+                cur.execute("SELECT config_version FROM rule_definitions WHERE rule_code='S1_TEMP_HIGH'")
+                self.rule_version = cur.fetchone()[0]
+                self.mapping_keys = (("ORGANIZATION", self.org), ("DEVICE", "TH-001"),
+                                     ("RULE", "S1_TEMP_HIGH"))
+                for entity_type, internal_id in self.mapping_keys:
+                    cur.execute("""INSERT INTO integration_identity_mappings
+                        (system_code,entity_type,internal_id,external_id,config_version,
+                         confirmed,enabled) VALUES ('nextgrp',%s,%s,%s,%s,TRUE,TRUE)
+                        ON CONFLICT (system_code,entity_type,internal_id) DO NOTHING""",
+                        (entity_type, internal_id, f"TEST-{entity_type}-{uuid.uuid4().hex}",
+                         self.rule_version if entity_type == "RULE" else 0))
                 cur.execute("""INSERT INTO alarm_occurrences
                     (alarm_key,episode_key,occurrence_kind,rule_code,device_id,severity,
                      event_type,triggered_at,payload_json)
                     VALUES (%s,%s,'TRIGGERED','S1_TEMP_HIGH','TH-001','HIGH',
                             'OUTBOX_TEST',%s,%s::jsonb)""",
-                    (self.key, self.key, self.at, '{"alarm_key":"' + self.key + '"}'))
+                    (self.key, self.key, self.at,
+                     '{"alarm_key":"' + self.key + '","rule_version":' +
+                     str(self.rule_version) + '}'))
                 cur.execute("""INSERT INTO alarm_outbox
                     (alarm_key,payload_json,next_attempt_at,created_at)
                     VALUES (%s,%s::jsonb,%s,%s)""",
                     (self.key, '{"alarm_key":"' + self.key + '"}', self.at, self.at))
+                cur.execute("SELECT id FROM alarm_outbox WHERE alarm_key=%s", (self.key,))
+                self.row_id = cur.fetchone()[0]
             conn.commit()
         self.store = OutboxStore(alarm_key=self.key)
 
@@ -44,6 +61,10 @@ class OutboxDatabaseTests(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM alarm_outbox WHERE alarm_key=%s", (self.key,))
                 cur.execute("DELETE FROM alarm_occurrences WHERE alarm_key=%s", (self.key,))
+                for entity_type, internal_id in self.mapping_keys:
+                    cur.execute("""DELETE FROM integration_identity_mappings
+                        WHERE system_code='nextgrp' AND entity_type=%s AND internal_id=%s
+                          AND left(external_id,5)='TEST-'""", (entity_type, internal_id))
             conn.commit()
 
     def state(self):
@@ -92,6 +113,39 @@ class OutboxDatabaseTests(unittest.TestCase):
         OutboxWorker(self.store, Adapter(), worker_id="restarted-worker").run_once(
             self.at + timedelta(seconds=2))
         self.assertEqual(self.state(), ("DELIVERED", 2, 0, "integration-ack", None))
+
+    def test_armed_scope_blocks_old_and_wrong_rows_but_allows_new_frozen_payload(self):
+        old = OutboxStore(min_id_exclusive=self.row_id, not_before=self.at,
+            approved_org=self.org, approved_devices=("TH-001", "DR-001"),
+            approved_rules=("S1_TEMP_HIGH", "S6_DOOR_OPEN"))
+        self.assertEqual(old.claim("armed-old", 10, 60, self.at), [])
+        wrong_device = OutboxStore(min_id_exclusive=self.row_id - 1, not_before=self.at,
+            approved_org=self.org, approved_devices=("DR-001",),
+            approved_rules=("S1_TEMP_HIGH",))
+        self.assertEqual(wrong_device.claim("armed-wrong", 10, 60, self.at), [])
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE integration_identity_mappings SET confirmed=FALSE
+                    WHERE system_code='nextgrp' AND entity_type='RULE'
+                      AND internal_id='S1_TEMP_HIGH'""")
+            conn.commit()
+        unconfirmed = OutboxStore(min_id_exclusive=self.row_id - 1, not_before=self.at,
+            approved_org=self.org, approved_devices=("TH-001", "DR-001"),
+            approved_rules=("S1_TEMP_HIGH", "S6_DOOR_OPEN"))
+        self.assertEqual(unconfirmed.claim("armed-unconfirmed", 10, 60, self.at), [])
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE integration_identity_mappings SET confirmed=TRUE
+                    WHERE system_code='nextgrp' AND entity_type='RULE'
+                      AND internal_id='S1_TEMP_HIGH'""")
+                cur.execute("UPDATE alarm_outbox SET payload_json=%s::jsonb WHERE id=%s",
+                            ('{"alarm_key":"NW-IT-RULE-S1:NW-IT-TH001:stable"}', self.row_id))
+            conn.commit()
+        valid = OutboxStore(min_id_exclusive=self.row_id - 1, not_before=self.at,
+            approved_org=self.org, approved_devices=("TH-001", "DR-001"),
+            approved_rules=("S1_TEMP_HIGH", "S6_DOOR_OPEN"))
+        claimed = valid.claim("armed-valid", 10, 60, self.at)
+        self.assertEqual([row[0] for row in claimed], [self.row_id])
 
     def test_two_workers_concurrent_claim(self):
         # Create second alarm row

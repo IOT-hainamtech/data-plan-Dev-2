@@ -236,8 +236,18 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
             raise ValueError("runtime, cleared payload and frozen occurrence Rule versions must match")
         mapped = deepcopy(payload)
         mapped.update({key: frozen.get(key) for key in
-            ("org_code", "device_id", "rule_id", "rule_version", "zone_code",
+            ("org_code", "device_id", "rule_id", "rule_version",
              "alarm_key", "episode_key")})
+        mapped.pop("zone_code", None)
+        mapped.pop("site_code", None)
+        if mapped.get("event"):
+            event_type = {
+                "S1_TEMP_HIGH": "TEMP_NORMAL",
+                "S6_DOOR_OPEN": "DOOR_CLOSED",
+            }.get(payload["rule_id"])
+            if event_type is None:
+                raise ValueError("Unconfirmed cleared event_type")
+            mapped["event"]["event_type"] = event_type
         return mapped
     mapped = deepcopy(payload)
     cur.execute("""SELECT config_version,config_json FROM rule_definitions
@@ -253,15 +263,13 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
         raise ValueError("confirmed Rule mapping must carry Dev 1 version >= 1")
     if payload.get("rule_version") != runtime_version or runtime_version != rule_version:
         raise ValueError("runtime, frozen payload and confirmed Dev 1 Rule versions must match")
-    zone = payload.get("zone_code")
-    if zone:
-        zone, _ = resolve_confirmed_mapping(cur, "ZONE", zone, system_code)
     started = datetime.fromisoformat(payload["episode_start"].replace("Z", "+00:00"))
     epoch = int(started.astimezone(timezone.utc).timestamp())
     external_key = f"{rule}:{device}:{epoch}"
     mapped.update({"org_code": org, "device_id": device, "rule_id": rule,
-                   "rule_version": rule_version, "zone_code": zone,
+                   "rule_version": rule_version,
                    "alarm_key": external_key, "episode_key": external_key})
+    mapped.pop("zone_code", None)
     mapped.pop("site_code", None)
     if mapped.get("event"):
         event_types = {

@@ -39,7 +39,8 @@ class OutboxStore:
     def __init__(self, connection_factory=db_connection, alarm_key=None,
                  table="alarm_outbox", key_column="alarm_key", not_before=None,
                  approved_ids=None, approved_org=None, approved_device=None,
-                 approved_rule=None):
+                 approved_rule=None, min_id_exclusive=None,
+                 approved_devices=None, approved_rules=None):
         self.connection_factory = connection_factory
         self.alarm_key = alarm_key
         self.table, self.key_column = table, key_column
@@ -47,6 +48,11 @@ class OutboxStore:
         self.approved_ids = tuple(approved_ids or ())
         self.approved_org, self.approved_device = approved_org, approved_device
         self.approved_rule = approved_rule
+        self.min_id_exclusive = min_id_exclusive
+        self.approved_devices = tuple(approved_devices or
+                                      ((approved_device,) if approved_device else ()))
+        self.approved_rules = tuple(approved_rules or
+                                    ((approved_rule,) if approved_rule else ()))
 
     def claim(self, worker_id, batch_size, lease_seconds, at):
         filters = ""
@@ -60,12 +66,43 @@ class OutboxStore:
         if self.approved_ids:
             filters += " AND id=ANY(%s)"
             params.append(list(self.approved_ids))
-        for field, value in (("org_code", self.approved_org),
-                             ("device_id", self.approved_device),
-                             ("rule_id", self.approved_rule)):
-            if value:
-                filters += f" AND payload_json->>'{field}'=%s"
-                params.append(value)
+        if self.min_id_exclusive is not None:
+            filters += " AND id>%s"
+            params.append(self.min_id_exclusive)
+        if self.table == "alarm_outbox" and (self.approved_org or self.approved_devices
+                                               or self.approved_rules):
+            approval = ["approval_occ.alarm_key=alarm_outbox.alarm_key",
+                """EXISTS (SELECT 1 FROM integration_identity_mappings approval_org_map
+                    WHERE approval_org_map.system_code='nextgrp'
+                      AND approval_org_map.entity_type='ORGANIZATION'
+                      AND approval_org_map.internal_id=approval_device.org_code
+                      AND approval_org_map.confirmed=TRUE AND approval_org_map.enabled=TRUE)""",
+                """EXISTS (SELECT 1 FROM integration_identity_mappings approval_device_map
+                    WHERE approval_device_map.system_code='nextgrp'
+                      AND approval_device_map.entity_type='DEVICE'
+                      AND approval_device_map.internal_id=approval_occ.device_id
+                      AND approval_device_map.confirmed=TRUE AND approval_device_map.enabled=TRUE)""",
+                """EXISTS (SELECT 1 FROM integration_identity_mappings approval_rule_map
+                    WHERE approval_rule_map.system_code='nextgrp'
+                      AND approval_rule_map.entity_type='RULE'
+                      AND approval_rule_map.internal_id=approval_occ.rule_code
+                      AND approval_rule_map.config_version=CASE
+                          WHEN approval_occ.payload_json->>'rule_version' ~ '^[0-9]+$'
+                          THEN (approval_occ.payload_json->>'rule_version')::integer ELSE -1 END
+                      AND approval_rule_map.confirmed=TRUE AND approval_rule_map.enabled=TRUE)"""]
+            if self.approved_org:
+                approval.append("approval_device.org_code=%s")
+                params.append(self.approved_org)
+            if self.approved_devices:
+                approval.append("approval_occ.device_id=ANY(%s)")
+                params.append(list(self.approved_devices))
+            if self.approved_rules:
+                approval.append("approval_occ.rule_code=ANY(%s)")
+                params.append(list(self.approved_rules))
+            filters += """ AND EXISTS (
+                SELECT 1 FROM alarm_occurrences approval_occ
+                JOIN devices approval_device ON approval_device.device_id=approval_occ.device_id
+                WHERE %s)""" % " AND ".join(approval)
         ordering_guard = ""
         if self.table == "alarm_outbox":
             ordering_guard = """AND NOT (payload_json->>'kind'='cleared' AND EXISTS (
@@ -265,12 +302,60 @@ def approved_delivery_selector():
     return ids, values
 
 
+def _csv_set(name):
+    values = tuple(sorted({item.strip() for item in os.getenv(name, "").split(",")
+                           if item.strip()}))
+    if not values:
+        raise ValueError(f"{name} must not be empty")
+    return values
+
+
+def armed_e2e_selector():
+    """Return the deliberately armed, new-row-only IF-05 acceptance window.
+
+    This mode is intentionally specific to the signed-off physical S1/S6 test.
+    It cannot be broadened with environment values and it never selects status
+    Outbox rows or pre-existing Alarm rows.
+    """
+    if not _env_bool("IF05_E2E_ARMED"):
+        return None
+    if os.getenv("IF05_APPROVED_OUTBOX_IDS", "").strip():
+        raise ValueError("IF05_E2E_ARMED cannot be combined with fixed Outbox IDs")
+    raw_mark = os.getenv("IF05_E2E_HIGH_WATER_ID", "").strip()
+    if not raw_mark:
+        raise ValueError("IF05_E2E_HIGH_WATER_ID is required when armed")
+    try:
+        high_water = int(raw_mark)
+    except ValueError as exc:
+        raise ValueError("IF05_E2E_HIGH_WATER_ID must be an integer") from exc
+    if high_water < 0:
+        raise ValueError("IF05_E2E_HIGH_WATER_ID must be non-negative")
+    armed_at = os.getenv("IF05_E2E_ARMED_AT", "").strip()
+    try:
+        parsed_at = datetime.fromisoformat(armed_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("IF05_E2E_ARMED_AT must be an ISO-8601 timestamp") from exc
+    if parsed_at.tzinfo is None:
+        raise ValueError("IF05_E2E_ARMED_AT must include a timezone")
+    org = os.getenv("IF05_E2E_ORG", "").strip()
+    devices, rules = _csv_set("IF05_E2E_DEVICES"), _csv_set("IF05_E2E_RULES")
+    if org != "hainam" or set(devices) != {"TH-001", "DR-001"} or set(rules) != {
+            "S1_TEMP_HIGH", "S6_DOOR_OPEN"}:
+        raise ValueError("armed IF-05 scope must exactly match the signed-off physical S1/S6 set")
+    return {"high_water": high_water,
+            "armed_at": parsed_at.astimezone(timezone.utc).replace(tzinfo=None),
+            "org": org, "devices": devices, "rules": rules}
+
+
 def main():
     if not _env_bool("OUTBOX_DELIVERY_ENABLED"):
         raise SystemExit("OUTBOX_DELIVERY_ENABLED is false; refusing external delivery")
     mode, alarm_url, status_url, token = bridge_settings()
     not_before = delivery_not_before()
     selector = approved_delivery_selector()
+    armed = armed_e2e_selector()
+    if selector and armed:
+        raise ValueError("fixed-ID and armed E2E selectors are mutually exclusive")
     allow_http = _env_bool("BRIDGE_ALLOW_INSECURE_HTTP",
                            _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"))
     adapter = alarm_adapter(mode, alarm_url, token,
@@ -287,6 +372,14 @@ def main():
         store_options.update({"approved_ids": ids, "approved_org": values["IF05_APPROVED_ORG"],
             "approved_device": values["IF05_APPROVED_DEVICE"],
             "approved_rule": values["IF05_APPROVED_RULE"]})
+    if armed:
+        if mode != "real" or not isinstance(adapter, FrappeAlarmAdapter):
+            raise ValueError("armed IF-05 requires BRIDGE_MODE=real and Frappe protocol")
+        if not alarm_url.lower().startswith("https://"):
+            raise ValueError("armed IF-05 requires an HTTPS Alarm endpoint")
+        store_options.update({"min_id_exclusive": armed["high_water"],
+            "not_before": armed["armed_at"], "approved_org": armed["org"],
+            "approved_devices": armed["devices"], "approved_rules": armed["rules"]})
     worker = OutboxWorker(
         OutboxStore(**store_options), adapter,
         batch_size=len(selector[0]) if selector else int(os.getenv("OUTBOX_BATCH_SIZE", "20")),
@@ -316,12 +409,20 @@ def main():
         # Phase 1 signs off Alarm only. Never send the incompatible Mock status
         # contract merely because the Alarm transport was switched to Frappe.
         status_worker = None
+    if armed:
+        # Physical acceptance sends only newly-created Alarm occurrences. Status
+        # delivery has a separate, not-yet-signed-off contract and stays off.
+        status_worker = None
     poll = max(0.1, float(os.getenv("OUTBOX_POLL_SECONDS", "1")))
     metrics_interval = max(1.0, float(os.getenv("OUTBOX_METRICS_SECONDS", "30")))
     next_metrics = 0.0
     LOG.info("BRIDGE_MODE=%s alarm_host=%s status_host=%s delivery_not_before=%s", mode,
              adapter.url.split("/", 3)[2], status_adapter.url.split("/", 3)[2],
              not_before.isoformat() + "Z" if not_before else "unset")
+    if armed:
+        LOG.info("IF05_E2E_ARMED high_water_id=%d armed_at=%s org=%s devices=%s rules=%s",
+                 armed["high_water"], armed["armed_at"].isoformat() + "Z", armed["org"],
+                 ",".join(armed["devices"]), ",".join(armed["rules"]))
     while True:
         try:
             processed = worker.run_once()
