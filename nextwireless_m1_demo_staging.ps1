@@ -1,4 +1,4 @@
-# nextWireless M1 - FIXED 2026-10-30: device_status and telemetry_reports schema
+# nextWireless M1 - canonical staged S1/S6 demo, Windows PowerShell 5.1+
 # ISOLATED staging only: Docker project nextwireless-dev2-staging,
 # PostgreSQL nextwireless_staging, API port 8003; Dev1 Frappe test API.
 # No MQTT, no physical ESP32, no original runtime services touched.
@@ -153,7 +153,7 @@ BEGIN
   IF current_database() <> 'nextwireless_staging' THEN RAISE EXCEPTION 'NOT STAGING'; END IF;
   IF NOT EXISTS (
     SELECT 1 FROM devices WHERE device_id=v_device
-    AND org_code='NW-LOCAL-ORG-001' AND enabled=TRUE
+    AND org_code='NW-LOCAL-ORG-001' AND enabled=TRUE AND profile_code='NW-IT-S1'
   ) THEN RAISE EXCEPTION 'S1 staging device missing/disabled/profile mismatch'; END IF;
   IF to_regclass('public.telemetry') IS NULL OR to_regclass('public.telemetry_reports') IS NULL
   THEN RAISE EXCEPTION 'Required telemetry tables missing'; END IF;
@@ -327,4 +327,4 @@ function Clear-NWDemoSession {
     $script:NWDemo = $null
     Write-Host 'Demo credentials cleared from script session.' -ForegroundColor Green
 }
-Write-Host 'Loaded nextWireless FIXED staging demo. Next: Initialize-NWDemo'  -ForegroundColor Cyan
+Write-Host 'Loaded nextWireless staging demo. Next: Initialize-NWDemo' -ForegroundColor Cyan
