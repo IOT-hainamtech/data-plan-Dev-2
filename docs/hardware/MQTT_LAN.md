@@ -5,7 +5,7 @@ access, disable certificate verification, or configure router/Internet forwardin
 
 ## Confirmed host network (2026-10-17)
 
-- Windows adapter: `Wi-Fi` (`hai nam tech`, Private profile)
+- Windows adapter: `Wi-Fi` (`<WIFI_SSID>`, Private profile)
 - Host IPv4: `192.168.1.40/24`
 - Gateway: `192.168.1.1`
 - Intended broker URL: `mqtts://192.168.1.40:8883`
