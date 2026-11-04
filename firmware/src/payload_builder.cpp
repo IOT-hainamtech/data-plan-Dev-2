@@ -78,3 +78,12 @@ std::string PayloadBuilder::door_heartbeat(const std::string& device, const std:
     cJSON_AddStringToObject(data, "door_state", open ? "open" : "closed");
     return finish(root);
 }
+std::string PayloadBuilder::presence(const std::string& device, const std::string& boot,
+                                     uint64_t seq, const char* ts) {
+    cJSON* root = base(device, boot, seq, ts);
+    cJSON_AddStringToObject(root, "msg_kind", "presence");
+    cJSON_AddStringToObject(root, "state", "online");
+    cJSON_AddStringToObject(root, "reason", "heartbeat");
+    cJSON_AddObjectToObject(root, "data");
+    return finish(root);
+}

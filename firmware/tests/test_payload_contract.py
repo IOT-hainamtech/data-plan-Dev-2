@@ -68,6 +68,14 @@ class PayloadContractTests(unittest.TestCase):
         self.assertEqual(event["event_id"], "DR-001-boot-8")
         self.assertEqual(heartbeat["data"]["door_state"], "open")
 
+    def test_presence_is_status_only_without_sensor_data(self):
+        presence = validate("nw/v1/demo/demo-site/TH-001/status", json.dumps({
+            "schema_version": 1, "msg_kind": "presence", "device_id": "TH-001",
+            "boot_id": "abc123", "seq": 10, "ts": "2026-11-03T08:30:00Z",
+            "ts_source": "ntp", "state": "online", "reason": "heartbeat", "data": {}}))
+        self.assertEqual(presence["msg_kind"], "presence")
+        self.assertEqual(presence["data"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

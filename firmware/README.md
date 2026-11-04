@@ -22,7 +22,8 @@ against the authoritative URD before production use.
 - `main.cpp`: telemetry/event/heartbeat scheduler and task watchdog.
 
 Both builds use monotonic deadlines and NVS-configured intervals in the URD
-range 30–60 seconds (default 60). SHT31 publishes measurement telemetry;
+range 1–60 seconds for SHT31 (TH-001 is provisioned at 1 second) and 30–60
+seconds for reed-door periodic snapshots. SHT31 publishes measurement telemetry;
 MC-38 publishes transition events immediately and a door-state heartbeat on
 the telemetry channel at its configured interval.
 

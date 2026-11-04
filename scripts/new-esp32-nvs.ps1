@@ -5,6 +5,7 @@ param(
     [SecureString]$MqttPassword,
     [string]$MqttCredentialFile,
     [ValidatePattern('^[A-Za-z0-9.-]+$')][string]$MqttHost = '192.168.1.40',
+    [switch]$EnableFastPresence,
     [switch]$UseExistingMqttSecret,
     [switch]$Force
 )
@@ -68,6 +69,9 @@ try {
     $content = $content.Replace('__WIFI_PASSWORD__', (ConvertTo-CsvField $wifiPlain))
     $content = $content.Replace('__MQTT_PASSWORD__', (ConvertTo-CsvField $mqttPlain))
     $content = $content -replace '(?m)^mqtt_uri,data,string,.*$', "mqtt_uri,data,string,mqtts://${MqttHost}:8883"
+    if ($EnableFastPresence) {
+        $content = $content -replace '(?m)^fast_presence,data,u8,.*$', 'fast_presence,data,u8,1'
+    }
     [IO.File]::WriteAllText($csv, $content, [Text.UTF8Encoding]::new($false))
     Push-Location $firmware
     try { & $python $generator generate $csv $image 0x6000 }

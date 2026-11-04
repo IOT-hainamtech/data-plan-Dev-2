@@ -5,6 +5,7 @@
 #include "config_manager.hpp"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -84,9 +85,15 @@ extern "C" void app_main() {
         ESP_ERROR_CHECK(watchdog_state);
     }
     TickType_t now_ticks = xTaskGetTickCount();
+    // Keep the fleet-start jitter for normal/legacy periods, but do not let a
+    // five-second jitter violate the deliberately configured one-second S1
+    // acquisition period. This jitter affects only the first sample.
+    const uint32_t sample_start_jitter_ms = config.telemetry_seconds >= 30U
+        ? esp_random() % 5001U : esp_random() % 251U;
     TickType_t next_sht31_sample = now_ticks + pdMS_TO_TICKS(
-        config.telemetry_seconds * 1000U + esp_random() % 5001U);
+        config.telemetry_seconds * 1000U + sample_start_jitter_ms);
     TickType_t next_door_heartbeat = now_ticks;
+    TickType_t next_presence = now_ticks + pdMS_TO_TICKS(config.presence_seconds * 1000U);
     TickType_t mqtt_disconnected_since = now_ticks;
     TickType_t last_wifi_recovery = now_ticks;
     uint32_t seen_connection = 0;
@@ -94,6 +101,7 @@ extern "C" void app_main() {
     std::string pending_birth; uint64_t pending_birth_seq = 0;
     bool initial_birth_pending = true;
     std::string pending_periodic, pending_periodic_topic; uint64_t pending_periodic_seq = 0;
+    std::string pending_presence; uint64_t pending_presence_seq = 0;
     bool have_previous_temperature = false;
     float previous_temperature = 0.0F;
 
@@ -103,6 +111,9 @@ extern "C" void app_main() {
         if (mqtt.connected()) {
             mqtt_disconnected_since = now;
         } else {
+            // Presence is an observation of the current connection, not durable
+            // business data. Never replay a stale heartbeat after reconnect.
+            pending_presence.clear();
             const TickType_t down = now - mqtt_disconnected_since;
             if (down >= pdMS_TO_TICKS(15U * 60U * 1000U)) {
                 ESP_LOGE(TAG, "MQTT unavailable for 15 minutes; restarting device");
@@ -210,6 +221,21 @@ extern "C" void app_main() {
                     local_time, config.device_id.c_str(), door.is_open() ? "OPEN" : "CLOSED",
                     static_cast<unsigned long long>(pending_periodic_seq));
             }
+        }
+        if (config.fast_presence_enabled && mqtt.connected() && pending_birth.empty() &&
+            pending_presence.empty() && deadline_reached(now, next_presence) && timestamp(ts)) {
+            do next_presence += pdMS_TO_TICKS(config.presence_seconds * 1000U);
+            while (deadline_reached(now, next_presence));
+            pending_presence_seq = sequence.next();
+            pending_presence = PayloadBuilder::presence(config.device_id, sequence.boot_id(),
+                                                        pending_presence_seq, ts);
+        }
+        if (!pending_presence.empty() && mqtt.publish(status_topic, pending_presence,
+                                                       pending_presence_seq, false, false, 1)) {
+            ESP_LOGI(TAG, "PRESENCE_QUEUED seq=%llu uptime_ms=%llu",
+                     static_cast<unsigned long long>(pending_presence_seq),
+                     static_cast<unsigned long long>(esp_timer_get_time() / 1000ULL));
+            pending_presence.clear();
         }
         if (!pending_periodic.empty() && mqtt.publish(pending_periodic_topic,
                                                       pending_periodic, pending_periodic_seq)) {

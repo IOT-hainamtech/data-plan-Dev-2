@@ -18,4 +18,6 @@ public:
                                   const std::string& event_id);
     static std::string door_heartbeat(const std::string& device, const std::string& boot,
                                       uint64_t seq, const char* timestamp, bool open);
+    static std::string presence(const std::string& device, const std::string& boot,
+                                uint64_t seq, const char* timestamp);
 };

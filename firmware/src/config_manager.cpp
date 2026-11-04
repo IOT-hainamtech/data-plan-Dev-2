@@ -51,12 +51,15 @@ bool ConfigManager::load(AppConfig& c, std::string& error) const {
               read_string(h, "profile_code", c.profile_code) &&
               read_string(h, "sensor_type", sensor);
     uint8_t address = c.sht31_address, closed = static_cast<uint8_t>(c.door_closed_level);
+    uint8_t fast_presence = c.fast_presence_enabled ? 1 : 0;
     nvs_get_u32(h, "telemetry_sec", &c.telemetry_seconds);
     nvs_get_u32(h, "heartbeat_sec", &c.heartbeat_seconds);
     nvs_get_u8(h, "sht31_address", &address);
     nvs_get_u8(h, "door_closed_lvl", &closed);
     nvs_get_u32(h, "door_debounce", &c.door_debounce_ms);
     nvs_get_u32(h, "mqtt_keepalive", &c.mqtt_keepalive_seconds);
+    nvs_get_u8(h, "fast_presence", &fast_presence);
+    nvs_get_u32(h, "presence_sec", &c.presence_seconds);
     // Optional for backward-compatible NVS migration; two safe defaults remain
     // when older partitions do not contain these keys.
     read_string(h, "ntp_server_1", c.ntp_server_1);
@@ -65,7 +68,9 @@ bool ConfigManager::load(AppConfig& c, std::string& error) const {
     if (read_string(h, "humidity_offset", humidity_offset)) c.humidity_offset = std::strtof(humidity_offset.c_str(), nullptr);
     nvs_close(h);
     if (!ok) { error = "required NVS configuration is missing"; return false; }
+    if (fast_presence > 1) { error = "fast_presence must be 0 or 1"; return false; }
     c.sht31_address = address; c.door_closed_level = closed;
+    c.fast_presence_enabled = fast_presence == 1;
     if (sensor == "sht31") c.sensor_type = SensorType::Sht31;
     else if (sensor == "reed_door") c.sensor_type = SensorType::ReedDoor;
     else { error = "sensor_type must be sht31 or reed_door"; return false; }
@@ -88,14 +93,22 @@ bool ConfigManager::validate(const AppConfig& c, std::string& error) {
     if (!environment_matches) {
         error = "NVS sensor_type does not match firmware environment"; return false;
     }
-    if (c.telemetry_seconds < 30 || c.telemetry_seconds > 60) {
-        error = "telemetry interval must be within 30..60 seconds"; return false;
+    const uint32_t minimum_telemetry_seconds =
+        c.sensor_type == SensorType::Sht31 ? 1U : 30U;
+    if (c.telemetry_seconds < minimum_telemetry_seconds || c.telemetry_seconds > 60) {
+        error = c.sensor_type == SensorType::Sht31
+            ? "SHT31 telemetry interval must be within 1..60 seconds"
+            : "reed-door telemetry interval must be within 30..60 seconds";
+        return false;
     }
     if (c.heartbeat_seconds < 30 || c.heartbeat_seconds > 120) {
         error = "heartbeat interval must be within 30..120 seconds"; return false;
     }
     if (c.mqtt_keepalive_seconds < 15 || c.mqtt_keepalive_seconds > 60) {
         error = "MQTT keepalive must be within 15..60 seconds"; return false;
+    }
+    if (c.presence_seconds < 1 || c.presence_seconds > 60) {
+        error = "presence interval must be within 1..60 seconds"; return false;
     }
     if (c.ntp_server_1.empty() || c.ntp_server_2.empty() ||
         c.ntp_server_1 == c.ntp_server_2) {

@@ -25,6 +25,8 @@ struct AppConfig {
     int door_closed_level{0};
     uint32_t door_debounce_ms{50};
     uint32_t mqtt_keepalive_seconds{30};
+    bool fast_presence_enabled{false};
+    uint32_t presence_seconds{1};
     std::string ntp_server_1{"pool.ntp.org"};
     std::string ntp_server_2{"time.google.com"};
 };

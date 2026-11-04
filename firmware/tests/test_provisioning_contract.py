@@ -22,7 +22,9 @@ class ProvisioningContractTests(unittest.TestCase):
         self.assertEqual(values["org_code"]["value"], "hainam")
         self.assertEqual(values["site_code"]["value"], "hq")
         self.assertEqual(values["sht31_address"]["value"], "68")
-        self.assertEqual(values["telemetry_sec"]["value"], "60")
+        self.assertEqual(values["telemetry_sec"]["value"], "1")
+        self.assertEqual(values["fast_presence"]["value"], "0")
+        self.assertEqual(values["presence_sec"]["value"], "1")
 
     def test_dr001_template_matches_firmware_and_broker_contract(self):
         values = self.load("nvs.dr001.template.csv")
@@ -36,6 +38,8 @@ class ProvisioningContractTests(unittest.TestCase):
         self.assertEqual(values["door_closed_lvl"]["value"], "0")
         self.assertEqual(values["door_debounce"]["value"], "50")
         self.assertEqual(values["heartbeat_sec"]["value"], "60")
+        self.assertEqual(values["fast_presence"]["value"], "0")
+        self.assertEqual(values["presence_sec"]["value"], "1")
 
     def test_templates_contain_placeholders_not_secrets(self):
         for name in ("nvs.th001.template.csv", "nvs.dr001.template.csv"):
@@ -50,6 +54,17 @@ class ProvisioningContractTests(unittest.TestCase):
         nvs = next(row for row in rows if row and row[0].strip() == "nvs")
         self.assertEqual(nvs[3].strip(), "0x9000")
         self.assertEqual(nvs[4].strip(), "0x6000")
+
+    def test_provisioning_requires_explicit_fast_presence_opt_in(self):
+        script = (ROOT.parent / "scripts" / "new-esp32-nvs.ps1").read_text(encoding="utf-8")
+        self.assertIn("[switch]$EnableFastPresence", script)
+        self.assertIn("if ($EnableFastPresence)", script)
+
+    def test_one_second_interval_is_sht31_only(self):
+        source = (ROOT / "src" / "config_manager.cpp").read_text(encoding="utf-8")
+        self.assertIn("c.sensor_type == SensorType::Sht31 ? 1U : 30U", source)
+        self.assertIn("SHT31 telemetry interval must be within 1..60 seconds", source)
+        self.assertIn("reed-door telemetry interval must be within 30..60 seconds", source)
 
 
 if __name__ == "__main__":
