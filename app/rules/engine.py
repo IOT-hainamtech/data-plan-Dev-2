@@ -249,7 +249,11 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
             cur.execute("""UPDATE rule_runtime_state SET current_state='open',state_changed_at=%s,
                 source_event_id=%s,episode_key=%s,episode_started_at=%s,recovery_started_at=NULL
                 WHERE rule_code=%s AND device_id=%s""",
-                (observed_at, event_id, episode, observed_at, rule_code, device_id))
+                # Keep the device observation for audit/order checks, but use
+                # server receive time as the Rule timer origin. Mixing a
+                # device clock with the server clock can otherwise shorten or
+                # extend the configured open limit when SNTP is skewed.
+                (observed_at, event_id, episode, received_at, rule_code, device_id))
         elif event_type == "DOOR_CLOSED":
             if state != "open":
                 continue
@@ -265,7 +269,7 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
                 episode_started_at=CASE WHEN %s THEN episode_started_at ELSE NULL END,
                 recovery_started_at=%s WHERE rule_code=%s AND device_id=%s""",
                 (observed_at, event_id, keep_episode, episode if keep_episode else None,
-                 keep_episode, observed_at if keep_episode else None, rule_code, device_id))
+                 keep_episode, received_at if keep_episode else None, rule_code, device_id))
     return changes + evaluate_due_rules(cur, received_at, device_id=device_id)
 
 
@@ -292,16 +296,17 @@ def evaluate_due_rules(cur, now, device_id=None):
             WHERE rule_code=%s AND device_id=%s""", (code, dev))
     cur.execute("""SELECT d.rule_code,s.device_id,d.severity,d.hold_seconds,d.quiet_seconds,
             d.business_start,d.business_end,d.schedule_timezone,s.state_changed_at,
-            s.last_fired_at,s.episode_key,s.source_event_id
+            s.episode_started_at,s.last_fired_at,s.episode_key,s.source_event_id
         FROM rule_definitions d JOIN rule_runtime_state s
           ON s.rule_code=d.rule_code
         WHERE d.enabled=TRUE AND d.rule_kind='STATE_CHANGE' AND s.current_state='open'
           AND s.is_active=FALSE AND (%s::text IS NULL OR s.device_id=%s)
         FOR UPDATE OF s""", (device_id, device_id))
-    for code, dev, severity, hold_s, quiet_s, start, end, tz_name, opened_at, last_fired, episode, source_event in cur.fetchall():
-        if not all((opened_at, episode)):
+    for (code, dev, severity, hold_s, quiet_s, start, end, tz_name,
+         device_opened_at, timer_started_at, last_fired, episode, source_event) in cur.fetchall():
+        if not all((timer_started_at, episode)):
             continue
-        if not door_should_fire(opened_at=opened_at, now=now, hold_seconds=hold_s,
+        if not door_should_fire(opened_at=timer_started_at, now=now, hold_seconds=hold_s,
                                 business_start=start, business_end=end, schedule_timezone=tz_name):
             continue
         if last_fired and (now - last_fired).total_seconds() < quiet_s:
@@ -311,9 +316,10 @@ def evaluate_due_rules(cur, now, device_id=None):
         created = _write_occurrence(
             cur, rule_code=code, device_id=dev, severity=severity,
             occurrence_kind="TRIGGERED", observed_at=now, episode_key=episode,
-            episode_started_at=opened_at,
+            episode_started_at=timer_started_at,
             event_type="DOOR_OPEN_OUTSIDE_HOURS" if outside else "DOOR_OPEN_TOO_LONG",
-            details={"device_event_id": source_event, "opened_at": opened_at.isoformat() + "Z",
+            details={"device_event_id": source_event,
+                     "opened_at": device_opened_at.isoformat() + "Z",
                      "hold_seconds": hold_s, "schedule_timezone": tz_name})
         cur.execute("""UPDATE rule_runtime_state SET is_active=TRUE,last_fired_at=%s
             WHERE rule_code=%s AND device_id=%s""", (now, code, dev))

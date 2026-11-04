@@ -181,6 +181,41 @@ class RuleDatabaseTests(unittest.TestCase):
         self.assertNotEqual(rows[0][3], rows[1][3])
         self.assertEqual([row[4] for row in rows], ["DOOR_OPENED", "DOOR_CLOSED"])
 
+    def test_s6_timer_uses_server_clock_when_device_clock_is_fast(self):
+        received = self.t0
+        device_event_at = received + timedelta(seconds=90)
+        on_event(self.cur, device_id="DR-001", event_id="fast-clock-open",
+                 event_type="DOOR_OPENED", received_at=received,
+                 observed_at=device_event_at, payload={"data": {"door_state": "open"}})
+
+        self.assertEqual(evaluate_due_rules(
+            self.cur, received + timedelta(seconds=299)), 0)
+        self.assertEqual(evaluate_due_rules(
+            self.cur, received + timedelta(seconds=300)), 1)
+        self.cur.execute("""SELECT state_changed_at,episode_started_at
+            FROM rule_runtime_state WHERE rule_code='S6_DOOR_OPEN' AND device_id='DR-001'""")
+        self.assertEqual(self.cur.fetchone(), (device_event_at, received))
+
+    def test_s6_timer_uses_server_clock_when_device_clock_is_slow(self):
+        received = self.t0
+        device_event_at = received - timedelta(seconds=90)
+        on_event(self.cur, device_id="DR-001", event_id="slow-clock-open",
+                 event_type="DOOR_OPENED", received_at=received,
+                 observed_at=device_event_at, payload={"data": {"door_state": "open"}})
+
+        self.assertEqual(evaluate_due_rules(
+            self.cur, received + timedelta(seconds=299)), 0)
+        self.assertEqual(evaluate_due_rules(
+            self.cur, received + timedelta(seconds=300)), 1)
+        self.cur.execute("""SELECT a.payload_json->'event'->'data'->>'opened_at',
+                s.episode_started_at
+            FROM alarm_occurrences a JOIN rule_runtime_state s
+              ON s.rule_code=a.rule_code AND s.device_id=a.device_id
+            WHERE a.rule_code='S6_DOOR_OPEN' AND a.occurrence_kind='TRIGGERED'""")
+        opened_at, timer_started_at = self.cur.fetchone()
+        self.assertEqual(opened_at, device_event_at.isoformat() + "Z")
+        self.assertEqual(timer_started_at, received)
+
     def test_migration_003_does_not_overwrite_if03_rule_v2(self):
         self.cur.execute("""UPDATE rule_definitions SET config_version=2,hold_seconds=300,
             clear_hold_seconds=0,quiet_seconds=0,business_start=NULL,business_end=NULL,
