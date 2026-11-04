@@ -1,16 +1,55 @@
 """Firmware contract plus optional PostgreSQL integration tests."""
 import os
+from types import SimpleNamespace
 import unittest
 import uuid
+from datetime import datetime, timezone
 from unittest import mock
 
 from core.database import db_connection
 from ingestion.contracts import (door_heartbeat_event, validate_door_heartbeat, validate_message,
                                  validate_telemetry_data)
-from ingestor import save_message
+from ingestor import (BUSINESS_EXECUTOR, PRESENCE_EXECUTOR, DeviceRateLimiter,
+                      on_message, rate_limit_key, save_message)
 
 
 class IngestorContractTests(unittest.TestCase):
+    def test_presence_dispatch_is_isolated_from_business_processing(self):
+        presence = SimpleNamespace(topic="nw/v1/hainam/hq/TH-001/status",
+            payload=b'{"msg_kind":"presence"}')
+        telemetry = SimpleNamespace(topic="nw/v1/hainam/hq/TH-001/telemetry",
+            payload=b'{"msg_kind":"telemetry"}')
+        with mock.patch.object(PRESENCE_EXECUTOR, "submit") as presence_submit, \
+             mock.patch.object(BUSINESS_EXECUTOR, "submit") as business_submit:
+            on_message(None, None, presence)
+            on_message(None, None, telemetry)
+        presence_submit.assert_called_once()
+        business_submit.assert_called_once()
+
+    def test_presence_uses_an_independent_rate_limit_bucket(self):
+        self.assertEqual(rate_limit_key("TH-001", {"msg_kind": "presence"}),
+                         "TH-001:presence")
+        self.assertEqual(rate_limit_key("TH-001", {"msg_kind": "telemetry"}), "TH-001")
+        self.assertEqual(rate_limit_key("TH-001", {"msg_kind": "event"}), "TH-001")
+        with mock.patch("ingestor.time.monotonic",
+                        side_effect=[0.0, 0.0, 0.2, 0.0, 0.0, 0.2]):
+            business = DeviceRateLimiter(capacity=1, refill_per_second=1)
+            presence = DeviceRateLimiter(capacity=1, refill_per_second=5)
+            self.assertTrue(business.allow("TH-001"))
+            self.assertFalse(business.allow("TH-001"))
+            self.assertTrue(presence.allow("TH-001:presence"))
+            self.assertTrue(presence.allow("TH-001:presence"))
+
+    def test_one_hertz_business_traffic_has_clock_jitter_margin(self):
+        # 0.96-second arrivals are 1.04 Hz: valid for a nominal one-second
+        # sensor schedule, and must not slowly drain the burst bucket.
+        limiter = DeviceRateLimiter(capacity=5, refill_per_second=1.25)
+        timeline = [index * 0.96 for index in range(120)]
+        # The first allow() also initializes the bucket timestamp.
+        clock_values = [timeline[0], timeline[0], *timeline[1:]]
+        with mock.patch("ingestor.time.monotonic", side_effect=clock_values):
+            self.assertTrue(all(limiter.allow("TH-001") for _ in timeline))
+
     def test_sht31_error_is_telemetry_without_fake_measurements(self):
         quality, metrics = validate_telemetry_data({"quality": "error", "data": {}})
         self.assertEqual(quality, "error")
@@ -80,6 +119,21 @@ class IngestorContractTests(unittest.TestCase):
         result = validate_message("nw/v1/demo/demo-site/DR-001/telemetry", body)
         self.assertEqual(result[5], "none")
 
+    def test_fast_presence_contract_is_status_only_and_empty(self):
+        body = {"schema_version": 1, "msg_kind": "presence", "device_id": "TH-001",
+                "boot_id": "a1b2c3d4", "seq": 12, "ts": "2026-11-03T08:30:00Z",
+                "ts_source": "ntp", "state": "online", "reason": "heartbeat", "data": {}}
+        result = validate_message("nw/v1/hainam/hq/TH-001/status", body)
+        self.assertEqual(result[3], "status")
+        for field, value, message in (("state", "offline", "online heartbeat"),
+                                      ("reason", "connect", "online heartbeat")):
+            invalid = dict(body); invalid[field] = value
+            with self.assertRaisesRegex(ValueError, message):
+                validate_message("nw/v1/hainam/hq/TH-001/status", invalid)
+        invalid = dict(body); invalid["data"] = {"temperature": 20}
+        with self.assertRaisesRegex(ValueError, "data must be empty"):
+            validate_message("nw/v1/hainam/hq/TH-001/status", invalid)
+
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")
 class TelemetryQualityDatabaseTests(unittest.TestCase):
@@ -93,6 +147,8 @@ class TelemetryQualityDatabaseTests(unittest.TestCase):
                             (self.boot_id,))
                 cur.execute("DELETE FROM telemetry_reports WHERE device_id='TH-001' AND boot_id=%s",
                             (self.boot_id,))
+                cur.execute("DELETE FROM device_event_outbox WHERE event_id LIKE %s",
+                            (f"TH-001-{self.boot_id}-%",))
             conn.commit()
 
     def test_error_report_is_persisted_without_numeric_measurements(self):
@@ -152,6 +208,22 @@ class TelemetryQualityDatabaseTests(unittest.TestCase):
                 cur.execute("SELECT count(*) FROM telemetry WHERE boot_id=%s", (self.boot_id,))
                 self.assertEqual(cur.fetchone()[0], 2)
 
+    def test_valid_live_telemetry_creates_one_deterministic_outbound_event(self):
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        body = {"schema_version": 1, "device_id": "TH-001", "boot_id": self.boot_id,
+                "seq": 20, "ts": stamp, "ts_source": "ntp", "quality": "good",
+                "data": {"temperature": 28.0, "humidity": 60.0}}
+        save_message("nw/v1/demo/demo-site/TH-001/telemetry", body)
+        save_message("nw/v1/demo/demo-site/TH-001/telemetry", body)
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT event_id,payload_json->>'event_type',
+                    jsonb_array_length(payload_json->'metrics')
+                    FROM device_event_outbox WHERE event_id=%s""",
+                    (f"TH-001-{self.boot_id}-20-telemetry",))
+                self.assertEqual(cur.fetchone(),
+                    (f"TH-001-{self.boot_id}-20-telemetry", "TELEMETRY_UPDATED", 2))
+
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")
 class DoorSnapshotDatabaseTests(unittest.TestCase):
@@ -163,7 +235,27 @@ class DoorSnapshotDatabaseTests(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM device_state_snapshots WHERE device_id='DR-001' AND boot_id=%s",
                             (self.boot_id,))
+                cur.execute("DELETE FROM device_events WHERE device_id='DR-001' AND boot_id=%s",
+                            (self.boot_id,))
+                cur.execute("DELETE FROM device_event_outbox WHERE event_id LIKE %s",
+                            (f"DR-001-{self.boot_id}-%",))
+                cur.execute("DELETE FROM rule_runtime_state WHERE device_id='DR-001'")
             conn.commit()
+
+    def test_real_door_transition_creates_one_outbound_event_not_heartbeat(self):
+        event_id = f"DR-001-{self.boot_id}-100"
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        body = {"schema_version": 1, "msg_kind": "event", "device_id": "DR-001",
+                "boot_id": self.boot_id, "seq": 100, "ts": stamp, "ts_source": "ntp",
+                "event_id": event_id, "event_type": "DOOR_OPENED",
+                "data": {"door_state": "open"}}
+        save_message("nw/v1/demo/demo-site/DR-001/event", body)
+        save_message("nw/v1/demo/demo-site/DR-001/event", body)
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT count(*),min(payload_json->>'door_state')
+                    FROM device_event_outbox WHERE event_id=%s""", (event_id,))
+                self.assertEqual(cur.fetchone(), (1, "open"))
 
     def test_telemetry_heartbeat_is_persisted_without_fake_device_event(self):
         body = {"schema_version": 1, "msg_kind": "heartbeat", "device_id": "DR-001",
@@ -183,6 +275,9 @@ class DoorSnapshotDatabaseTests(unittest.TestCase):
                 self.assertEqual(cur.fetchone(), (101, "closed", mock.ANY, "ntp"))
                 cur.execute("SELECT count(*) FROM device_events WHERE device_id='DR-001'")
                 self.assertEqual(cur.fetchone()[0], before)
+                cur.execute("SELECT count(*) FROM device_event_outbox WHERE event_id LIKE %s",
+                            (f"DR-001-{self.boot_id}-%",))
+                self.assertEqual(cur.fetchone()[0], 0)
         from api.application import latest
         projection = latest("DR-001", "demo")
         self.assertEqual(projection["door_state"], "closed")

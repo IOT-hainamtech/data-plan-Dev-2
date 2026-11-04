@@ -79,6 +79,11 @@ services:
       MQTT_PORT: "8883"
       MQTT_CA_FILE: /run/mqtt/ca.crt
       MQTT_TLS_MIN_VERSION: "1.2"
+      MQTT_DEVICE_RATE_PER_SECOND: ${MQTT_DEVICE_RATE_PER_SECOND:-1.25}
+      # Empty allowlist is fail-safe: migration/deploy alone enables no device.
+      FAST_PRESENCE_DEVICE_IDS: ${FAST_PRESENCE_DEVICE_IDS:-}
+      FAST_PRESENCE_TIMEOUT_SECONDS: ${FAST_PRESENCE_TIMEOUT_SECONDS:-4}
+      FAST_PRESENCE_RECONCILE_SECONDS: ${FAST_PRESENCE_RECONCILE_SECONDS:-0.5}
     volumes:
       - mqtt_ca:/run/mqtt:ro
       - ./db/migrations:/migrations:ro

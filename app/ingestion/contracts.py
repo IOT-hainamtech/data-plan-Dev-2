@@ -118,7 +118,7 @@ def validate_message(topic, payload):
         source = "none"
     kind = payload.get("msg_kind")
     expected = {"telemetry": ("measurement", "heartbeat"), "event": ("event",),
-                "status": ("status",)}[channel]
+                "status": ("status", "presence")}[channel]
     if kind is not None and kind not in expected:
         raise ValueError("msg_kind does not match MQTT channel")
     # v1.1 messages use the compact boot ID. Legacy messages without the new
@@ -132,4 +132,9 @@ def validate_message(topic, payload):
             raise ValueError("event_type required")
     if channel == "status" and payload.get("state") not in ("online", "offline"):
         raise ValueError("status state must be online/offline")
+    if kind == "presence":
+        if payload.get("state") != "online" or payload.get("reason") != "heartbeat":
+            raise ValueError("presence must report online heartbeat")
+        if payload["data"]:
+            raise ValueError("presence data must be empty")
     return org, site, device, channel, stamp, source

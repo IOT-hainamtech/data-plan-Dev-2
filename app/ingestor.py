@@ -6,6 +6,7 @@ import ssl
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -19,7 +20,9 @@ from ingestion.contracts import (door_heartbeat_event, parse_timestamp,
                                  validate_telemetry_data)
 from registry import load_device_profile, load_profile_contract, load_profile_event_types
 from rules.engine import evaluate_due_rules, on_event, on_telemetry
-from status import reconcile_device_timeouts, update_device_presence
+from realtime import enqueue_device_event, enqueue_telemetry_event
+from status import (reconcile_device_timeouts, reconcile_fast_presence_timeouts,
+                    update_device_presence, update_fast_presence)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger("data-plane")
@@ -28,22 +31,40 @@ MAX_MQTT_PAYLOAD_BYTES = int(os.getenv("MQTT_MAX_PAYLOAD_BYTES", "512"))
 
 class DeviceRateLimiter:
     """Token bucket: burst five messages, sustained refill one message/second."""
-    def __init__(self):
-        self._state = defaultdict(lambda: [5.0, time.monotonic()])
+    def __init__(self, capacity=5.0, refill_per_second=1.0):
+        self.capacity = float(capacity)
+        self.refill_per_second = float(refill_per_second)
+        self._state = defaultdict(lambda: [self.capacity, time.monotonic()])
         self._lock = threading.Lock()
 
     def allow(self, device_id):
         now = time.monotonic()
         with self._lock:
             state = self._state[device_id]
-            state[0] = min(5.0, state[0] + now - state[1]); state[1] = now
+            elapsed = now - state[1]
+            state[0] = min(self.capacity, state[0] + elapsed * self.refill_per_second)
+            state[1] = now
             if state[0] < 1.0:
                 return False
             state[0] -= 1.0
             return True
 
 
-RATE_LIMITER = DeviceRateLimiter()
+# A nominal one-second ESP32 schedule can arrive slightly faster than one
+# message per wall-clock second because of oscillator and network jitter. Keep
+# a narrow 25% margin while retaining the five-message burst ceiling.
+RATE_LIMITER = DeviceRateLimiter(
+    capacity=5.0,
+    refill_per_second=float(os.getenv("MQTT_DEVICE_RATE_PER_SECOND", "1.25")),
+)
+PRESENCE_RATE_LIMITER = DeviceRateLimiter(capacity=5.0, refill_per_second=5.0)
+PRESENCE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mqtt-presence")
+BUSINESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mqtt-business")
+
+
+def rate_limit_key(device_id, body):
+    """Keep 1 Hz presence independent from lower-frequency business traffic."""
+    return f"{device_id}:presence" if body.get("msg_kind") == "presence" else device_id
 
 
 def record_ingestion_metric(org, name, *, error_code="", latency_ms=0.0):
@@ -120,6 +141,10 @@ def save_message(topic, body):
                 if new_count and quality == "good" and not ts_suspect:
                     on_telemetry(cur, device_id=device, metric=metric, value=float(value),
                                  measured_at=stamp, received_at=received)
+            if quality == "good" and not ts_suspect:
+                enqueue_telemetry_event(cur, org_code=org, device_id=device,
+                    boot_id=body["boot_id"], seq=body["seq"], measured_at=stamp,
+                    metrics=metrics, point_definitions=point_definitions, created_at=received)
         elif channel == "event":
             event_type = body["event_type"]
             cur.execute("""SELECT state_point,state_value FROM device_profile_events
@@ -139,13 +164,31 @@ def save_message(topic, body):
             if inserted:
                 update_device_presence(cur, device_id=device, boot_id=body["boot_id"], received_at=received)
                 if not ts_suspect:
+                    enqueue_device_event(cur, org_code=org, device_id=device,
+                        event_id=body["event_id"], event_type=event_type, event_at=stamp,
+                        door_state=body["data"].get("door_state"), created_at=received)
                     on_event(cur, device_id=device, event_id=body["event_id"],
                              event_type=event_type, received_at=received, payload=body,
                              observed_at=stamp)
         else:
             state = body["state"]
+            if body.get("msg_kind") == "presence":
+                allowed = {item.strip() for item in os.getenv("FAST_PRESENCE_DEVICE_IDS", "").split(",")
+                           if item.strip()}
+                if device not in allowed:
+                    # A device may still run firmware that emits presence after
+                    # server-side opt-out. Ignore it without status mutation,
+                    # durable metrics, or warning-log noise.
+                    LOG.debug("IGNORED presence device=%s fast presence disabled", device)
+                    return 0
+                inserted = update_fast_presence(cur, device_id=device, boot_id=body["boot_id"],
+                                                seq=body["seq"], received_at=received)
+                conn.commit()
+                LOG.debug("SAVED presence device=%s accepted=%d", device, inserted)
+                return inserted
             inserted = update_device_presence(cur, device_id=device, boot_id=body["boot_id"],
-                                              received_at=received, explicit_state=state)
+                                              received_at=received, explicit_state=state,
+                                              seq=body["seq"])
             points = load_profile_contract(cur, profile, "status")
             event_types = load_profile_event_types(cur, profile, "door_state")
             heartbeat = door_heartbeat_event(profile, body, event_types) if "door_state" in points else None
@@ -202,29 +245,43 @@ def configure_mqtt_security(client):
     client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 
-def on_message(client, userdata, message):
-    started = time.monotonic()
+def process_message(topic, body, started):
     org = "unknown"
+    try:
+        parts = topic.split("/")
+        if len(parts) == 6:
+            org = parts[2]
+        presence = body.get("msg_kind") == "presence"
+        if not presence:
+            record_ingestion_metric(org, "received")
+        limiter = PRESENCE_RATE_LIMITER if body.get("msg_kind") == "presence" else RATE_LIMITER
+        if len(parts) == 6 and not limiter.allow(rate_limit_key(parts[4], body)):
+            raise ValueError("E-RATE device message rate exceeded")
+        inserted = save_message(topic, body)
+        latency = (time.monotonic() - started) * 1000.0
+        if not presence:
+            record_ingestion_metric(org, "duplicate" if inserted == 0 else "valid", latency_ms=latency)
+    except (ValueError, KeyError, TypeError, psycopg.Error) as exc:
+        code = str(exc).split(" ", 1)[0][:48]
+        if body.get("msg_kind") != "presence":
+            record_ingestion_metric(org, "rejected", error_code=code,
+                                    latency_ms=(time.monotonic() - started) * 1000.0)
+        LOG.warning("REJECTED topic=%s reason=%s", topic, exc)
+    except Exception:
+        LOG.exception("Unexpected processing failure topic=%s", topic)
+
+
+def on_message(client, userdata, message):
+    """Keep the Paho network loop non-blocking and isolate presence latency."""
+    started = time.monotonic()
     try:
         if len(message.payload) > MAX_MQTT_PAYLOAD_BYTES:
             raise ValueError("E-SIZE payload exceeds 512 bytes")
-        parts = message.topic.split("/")
-        if len(parts) == 6:
-            org = parts[2]
-        record_ingestion_metric(org, "received")
-        if len(parts) == 6 and not RATE_LIMITER.allow(parts[4]):
-            raise ValueError("E-RATE device message rate exceeded")
         body = json.loads(message.payload.decode("utf-8"))
-        inserted = save_message(message.topic, body)
-        latency = (time.monotonic() - started) * 1000.0
-        record_ingestion_metric(org, "duplicate" if inserted == 0 else "valid", latency_ms=latency)
-    except (ValueError, KeyError, TypeError, psycopg.Error) as exc:
-        code = str(exc).split(" ", 1)[0][:48]
-        record_ingestion_metric(org, "rejected", error_code=code,
-                                latency_ms=(time.monotonic() - started) * 1000.0)
+        executor = PRESENCE_EXECUTOR if body.get("msg_kind") == "presence" else BUSINESS_EXECUTOR
+        executor.submit(process_message, message.topic, body, started)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         LOG.warning("REJECTED topic=%s reason=%s", message.topic, exc)
-    except Exception:
-        LOG.exception("Unexpected processing failure topic=%s", message.topic)
 
 
 def rule_timer(stop_event):
@@ -245,6 +302,29 @@ def rule_timer(stop_event):
             LOG.exception("Rule timer iteration failed")
 
 
+def fast_presence_timer(stop_event):
+    devices = {item.strip() for item in os.getenv("FAST_PRESENCE_DEVICE_IDS", "").split(",")
+               if item.strip()}
+    if not devices:
+        LOG.info("Fast Presence disabled (FAST_PRESENCE_DEVICE_IDS is empty)")
+        return
+    interval = max(0.1, float(os.getenv("FAST_PRESENCE_RECONCILE_SECONDS", "0.5")))
+    timeout = max(1.0, float(os.getenv("FAST_PRESENCE_TIMEOUT_SECONDS", "4")))
+    LOG.info("Fast Presence enabled devices=%s timeout=%.3fs reconcile=%.3fs",
+             ",".join(sorted(devices)), timeout, interval)
+    while not stop_event.wait(interval):
+        try:
+            now = now_utc()
+            with db_connection() as conn:
+                with conn.cursor() as cur:
+                    changes = reconcile_fast_presence_timeouts(cur, now, devices, timeout)
+                conn.commit()
+            if changes:
+                LOG.info("Fast Presence marked %d device(s) offline", changes)
+        except Exception:
+            LOG.exception("Fast Presence reconciliation failed")
+
+
 def main():
     mqtt_host = os.getenv("MQTT_HOST", "mqtt")
     mqtt_port = int(os.getenv("MQTT_PORT", "8883"))
@@ -257,6 +337,9 @@ def main():
     stop_event = threading.Event()
     timer = threading.Thread(target=rule_timer, args=(stop_event,), name="rule-timer", daemon=True)
     timer.start()
+    presence_timer = threading.Thread(target=fast_presence_timer, args=(stop_event,),
+                                      name="fast-presence-timer", daemon=True)
+    presence_timer.start()
     while True:
         try:
             client.connect(mqtt_host, mqtt_port, keepalive=60)

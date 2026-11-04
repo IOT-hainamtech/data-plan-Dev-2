@@ -35,7 +35,9 @@ class StatusReconciliationTests(unittest.TestCase):
         payload = getattr(first.inserted[0][2], "obj", first.inserted[0][2])
         self.assertEqual(payload["state"], "online")
         self.assertEqual(set(payload), {
-            "event_id", "org_code", "device_id", "state", "since", "last_seen", "reason"})
+            "event_id", "org_code", "device_id", "state", "since", "last_seen", "reason",
+            "transition"})
+        self.assertIs(payload["transition"], False)
 
 
 if __name__ == "__main__":

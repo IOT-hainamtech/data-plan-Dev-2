@@ -63,12 +63,13 @@ class FrappeClient:
     METHODS = {
         "config": "config_controller.get_device_config",
         "status": "status_controller.receive_status",
+        "device_event": "device_event_controller.receive_device_event",
         "alarm": "alarm_controller.receive_alarm",
         "claim_command": "command_controller.claim_command",
         "ack_command": "command_controller.ack_command",
     }
 
-    def __init__(self, base_url, site_name, token=None, timeout=5, *,
+    def __init__(self, base_url, site_name, token=None, timeout=5, *, org_code=None,
                  api_key=None, api_secret=None, allow_http_lan=False,
                  opener=urllib.request.urlopen):
         base_url = base_url.rstrip("/")
@@ -79,6 +80,7 @@ class FrappeClient:
         if not site_name or any(c in site_name for c in "\r\n"):
             raise ValueError("Frappe site name is required")
         self.base_url, self.site_name = base_url, site_name
+        self.org_code = org_code
         self.timeout, self.opener = float(timeout), opener
 
     def __repr__(self):
@@ -105,10 +107,12 @@ class FrappeClient:
             "X-Frappe-Site-Name": self.site_name,
             "Accept": "application/json",
         }
+        if self.org_code:
+            headers["X-Org-Code"] = self.org_code
         if data is not None:
             headers["Content-Type"] = ("application/json" if json_body is not None
                                        else "application/x-www-form-urlencoded")
-        if name == "alarm":
+        if name in ("alarm", "device_event", "status"):
             headers["ngrok-skip-browser-warning"] = "true"
         request = urllib.request.Request(url, data=data, headers=headers,
                                          method="GET" if data is None else "POST")
@@ -153,6 +157,26 @@ class FrappeClient:
         if state not in ("online", "offline"):
             raise ValueError("state must be 'online' or 'offline'")
         return self._request("status", form={"device_id": device_id, "state": state})
+
+    def post_status_json(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("status payload must be a JSON object")
+        device_id, state = payload.get("device_id"), payload.get("state")
+        if not device_id or any(c in str(device_id) for c in "\r\n"):
+            raise ValueError("device_id is required")
+        if state not in ("online", "offline"):
+            raise ValueError("state must be 'online' or 'offline'")
+        return self._request("status", json_body={"device_id": device_id, "state": state})
+
+    def post_device_event(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("device event payload must be a JSON object")
+        for field in ("device_id", "event_type", "event_at"):
+            if not payload.get(field):
+                raise ValueError(f"device event payload missing required field '{field}'")
+        if payload["event_type"] == "TELEMETRY_UPDATED" and not payload.get("metrics"):
+            raise ValueError("telemetry event requires at least one metric")
+        return self._request("device_event", json_body=payload)
 
     def post_alarm(self, payload):
         if not isinstance(payload, dict):

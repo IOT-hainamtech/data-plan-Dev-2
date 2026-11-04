@@ -4,6 +4,12 @@ import unittest
 
 
 class ComposeSecurityTests(unittest.TestCase):
+    def test_fast_presence_is_disabled_by_default(self):
+        compose = (Path(__file__).resolve().parents[2] / "compose.yaml").read_text(encoding="utf-8")
+        self.assertIn("FAST_PRESENCE_DEVICE_IDS: ${FAST_PRESENCE_DEVICE_IDS:-}", compose)
+        self.assertIn("FAST_PRESENCE_TIMEOUT_SECONDS: ${FAST_PRESENCE_TIMEOUT_SECONDS:-4}", compose)
+        self.assertIn("FAST_PRESENCE_RECONCILE_SECONDS: ${FAST_PRESENCE_RECONCILE_SECONDS:-0.5}", compose)
+
     def test_data_api_requires_token_and_defaults_to_loopback(self):
         compose = (Path(__file__).resolve().parents[2] / "compose.yaml").read_text(encoding="utf-8")
         self.assertIn(

@@ -23,6 +23,7 @@ class Adapter:
 class OutboxDatabaseTests(unittest.TestCase):
     def setUp(self):
         self.key = f"test-outbox-{uuid.uuid4().hex}"
+        self.status_event_ids = []
         self.at = datetime(2035, 1, 1)
         with db_connection() as conn:
             with conn.cursor() as cur:
@@ -59,6 +60,9 @@ class OutboxDatabaseTests(unittest.TestCase):
     def tearDown(self):
         with db_connection() as conn:
             with conn.cursor() as cur:
+                if self.status_event_ids:
+                    cur.execute("DELETE FROM status_outbox WHERE delivery_event_id=ANY(%s)",
+                                (self.status_event_ids,))
                 cur.execute("DELETE FROM alarm_outbox WHERE alarm_key=%s", (self.key,))
                 cur.execute("DELETE FROM alarm_occurrences WHERE alarm_key=%s", (self.key,))
                 for entity_type, internal_id in self.mapping_keys:
@@ -146,6 +150,31 @@ class OutboxDatabaseTests(unittest.TestCase):
             approved_rules=("S1_TEMP_HIGH", "S6_DOOR_OPEN"))
         claimed = valid.claim("armed-valid", 10, 60, self.at)
         self.assertEqual([row[0] for row in claimed], [self.row_id])
+
+    def test_status_arm_excludes_backlog_and_reconciliation_snapshot(self):
+        self.status_event_ids = [str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())]
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO status_outbox
+                    (delivery_event_id,device_id,payload_json,next_attempt_at,created_at)
+                    VALUES (%s,'TH-001',%s::jsonb,%s,%s) RETURNING id""",
+                    (self.status_event_ids[0],
+                     '{"org_code":"' + self.org + '","transition":true}', self.at, self.at))
+                high_water = cur.fetchone()[0]
+                cur.execute("""INSERT INTO status_outbox
+                    (delivery_event_id,device_id,payload_json,next_attempt_at,created_at)
+                    VALUES (%s,'TH-001',%s::jsonb,%s,%s),
+                           (%s,'TH-001',%s::jsonb,%s,%s)""",
+                    (self.status_event_ids[1],
+                     '{"org_code":"' + self.org + '","transition":false}', self.at, self.at,
+                     self.status_event_ids[2],
+                     '{"org_code":"' + self.org + '","transition":true}', self.at, self.at))
+            conn.commit()
+        store = OutboxStore(table="status_outbox", key_column="delivery_event_id",
+            min_id_exclusive=high_water, not_before=self.at, approved_org=self.org,
+            approved_devices=("TH-001", "DR-001"))
+        claimed = store.claim("realtime-status", 10, 60, self.at)
+        self.assertEqual([str(row[1]) for row in claimed], [self.status_event_ids[2]])
 
     def test_two_workers_concurrent_claim(self):
         # Create second alarm row

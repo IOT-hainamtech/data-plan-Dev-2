@@ -36,6 +36,32 @@ try {
       "SELECT retention_days,enabled FROM telemetry_retention_config; SELECT count(*) AS active_retention_jobs FROM timescaledb_information.jobs WHERE proc_name='policy_retention' AND hypertable_name='telemetry';"
     if ($LASTEXITCODE -ne 0) { throw 'Disabled retention verification failed' }
 
+    Get-Content -LiteralPath (Join-Path $root 'db/rollback/017_fast_presence.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Fast Presence rollback failed' }
+    docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+      -U nw_user -d nextwireless -c `
+      "SELECT count(*)=0 AS rollback_removed_presence_columns FROM information_schema.columns WHERE table_name='device_status' AND column_name LIKE 'presence_%';"
+    if ($LASTEXITCODE -ne 0) { throw 'Fast Presence rollback verification failed' }
+    Get-Content -LiteralPath (Join-Path $root 'db/migrations/017_fast_presence.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Fast Presence reapply after rollback failed' }
+
+    Get-Content -LiteralPath (Join-Path $root 'db/rollback/018_realtime_event_outbox.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Realtime Event Outbox rollback failed' }
+    docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+      -U nw_user -d nextwireless -c `
+      "SELECT to_regclass('public.device_event_outbox') IS NULL AS rollback_removed_event_outbox;"
+    if ($LASTEXITCODE -ne 0) { throw 'Realtime Event Outbox rollback verification failed' }
+    Get-Content -LiteralPath (Join-Path $root 'db/migrations/018_realtime_event_outbox.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Realtime Event Outbox reapply failed' }
+
     Get-Content -LiteralPath (Join-Path $root 'db/rollback/016_retention_configuration.sql') -Raw | `
       docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
         -U nw_user -d nextwireless

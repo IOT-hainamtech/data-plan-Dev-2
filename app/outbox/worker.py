@@ -69,6 +69,22 @@ class OutboxStore:
         if self.min_id_exclusive is not None:
             filters += " AND id>%s"
             params.append(self.min_id_exclusive)
+        if self.table in ("status_outbox", "device_event_outbox") and (
+                self.approved_org or self.approved_devices):
+            if self.table == "status_outbox":
+                # Reconciliation snapshots share this durable table but are not
+                # connectivity transitions. The realtime bridge must never
+                # deliver them as ONLINE/OFFLINE events.
+                filters += " AND payload_json->>'transition'='true'"
+            if self.approved_org:
+                filters += " AND payload_json->>'org_code'=%s"
+                params.append(self.approved_org)
+            if self.approved_devices:
+                filters += " AND device_id=ANY(%s)"
+                params.append(list(self.approved_devices))
+            filters += """ AND EXISTS (SELECT 1 FROM integration_identity_mappings m
+                WHERE m.system_code='nextgrp' AND m.entity_type='DEVICE'
+                  AND m.internal_id=device_id AND m.confirmed=TRUE AND m.enabled=TRUE)"""
         if self.table == "alarm_outbox" and (self.approved_org or self.approved_devices
                                                or self.approved_rules):
             approval = ["approval_occ.alarm_key=alarm_outbox.alarm_key",
@@ -204,8 +220,9 @@ class OutboxWorker:
             wire_alarm_key = row[4] if len(row) > 4 else None
             status = None
             try:
-                already_frozen = (wire_alarm_key is not None and isinstance(payload, dict)
-                                  and payload.get("alarm_key") != wire_alarm_key)
+                already_frozen = (isinstance(payload, dict) and payload.get("_wire_frozen") is True) or (
+                    wire_alarm_key is not None and isinstance(payload, dict)
+                    and payload.get("alarm_key") != wire_alarm_key)
                 if self.payload_transform and not already_frozen:
                     payload = self.payload_transform(payload)
                     if not self.store.persist_payload(row_id, self.worker_id, payload):
@@ -217,6 +234,7 @@ class OutboxWorker:
                 status_ok = status == 202 if getattr(self.adapter,"require_202",False) else 200 <= status < 300
                 ack_validator = getattr(self.adapter, "validate_ack", validate_ack)
                 frappe_ack = (isinstance(self.adapter, FrappeAlarmAdapter)
+                              or getattr(self.adapter, "expects_payload_ack", False)
                               or ack_validator is FrappeAlarmAdapter.validate_ack)
                 ack_expected = payload if frappe_ack else expected_alarm
                 if not status_ok or not ack_validator(result.body, ack_expected, event_id):

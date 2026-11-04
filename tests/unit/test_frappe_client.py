@@ -124,6 +124,25 @@ class FrappeClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "state must be 'online' or 'offline'"):
             client.post_status("NW-IT-TH001", "invalid_state")
 
+    def test_realtime_status_and_device_event_use_json_and_org_header(self):
+        recorder = Recorder(Response(200, {"message": {"accepted": True}}))
+        client = self.client(recorder, org_code="hainam")
+        client.post_status_json({"device_id": "NW-IT-TH001", "state": "offline"})
+        status_request = recorder.requests[-1][0]
+        self.assertEqual(json.loads(status_request.data),
+                         {"device_id": "NW-IT-TH001", "state": "offline"})
+        self.assertEqual(status_request.get_header("Content-type"), "application/json")
+        self.assertEqual(status_request.get_header("X-org-code"), "hainam")
+        event = {"device_id": "NW-IT-DR001", "event_id": "evt-1",
+                 "event_type": "DOOR_OPENED", "event_at": "2026-11-03T16:00:00+07:00",
+                 "door_state": "open", "data_status": "LIVE"}
+        client.post_device_event(event)
+        event_request = recorder.requests[-1][0]
+        self.assertIn(METHOD_PREFIX + "device_event_controller.receive_device_event",
+                      event_request.full_url)
+        self.assertEqual(json.loads(event_request.data), event)
+        self.assertEqual(event_request.get_header("X-org-code"), "hainam")
+
     # -------------------------------------------------------------------------
     # POST Alarm
     # -------------------------------------------------------------------------

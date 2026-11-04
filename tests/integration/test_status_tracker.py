@@ -3,11 +3,13 @@ import os
 import unittest
 import uuid
 from datetime import datetime, timedelta
+from unittest import mock
 
 from core.database import db_connection
 from ingestor import save_message
 from status.service import (enqueue_status_reconciliation,
-                            reconcile_device_timeouts, update_device_presence)
+                            reconcile_device_timeouts, reconcile_fast_presence_timeouts,
+                            update_device_presence, update_fast_presence)
 
 
 @unittest.skipUnless(os.getenv("RUN_DB_TESTS") == "1", "set RUN_DB_TESTS=1")
@@ -158,7 +160,79 @@ class StatusTrackerTests(unittest.TestCase):
         self.assertEqual(status[0], "offline")
         self.assertEqual(self.get_history_count("offline"), 1)
 
-        # Running reconciler again does not duplicate the offline transition.
+    def test_fast_presence_order_timeout_and_transition_dedup(self):
+        boot = "a1b2c3d4"
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                update_device_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                       received_at=self.t0, explicit_state="online", seq=0)
+                accepted = update_fast_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                                seq=10, received_at=self.t0 + timedelta(seconds=1))
+                duplicate = update_fast_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                                 seq=10, received_at=self.t0 + timedelta(seconds=2))
+                old_sequence = update_fast_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                                    seq=9, received_at=self.t0 + timedelta(seconds=3))
+                old_boot = update_fast_presence(cur, device_id=self.dev_id, boot_id="deadbeef",
+                                                seq=99, received_at=self.t0 + timedelta(seconds=3))
+            conn.commit()
+        self.assertEqual((accepted, duplicate, old_sequence, old_boot), (1, 0, 0, 0))
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                # Missing one or two 1-second heartbeats must remain online.
+                self.assertEqual(reconcile_fast_presence_timeouts(
+                    cur, self.t0 + timedelta(seconds=3.9), [self.dev_id], 4), 0)
+                self.assertEqual(reconcile_fast_presence_timeouts(
+                    cur, self.t0 + timedelta(seconds=5), [self.dev_id], 4), 1)
+                # Repeated reconciliation cannot duplicate the transition.
+                self.assertEqual(reconcile_fast_presence_timeouts(
+                    cur, self.t0 + timedelta(seconds=6), [self.dev_id], 4), 0)
+            conn.commit()
+        self.assertEqual(self.get_status()[0], "offline")
+        self.assertEqual(self.get_history_count("offline"), 1)
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT count(*),bool_and(payload_json->>'transition'='true')
+                    FROM status_outbox WHERE device_id=%s""", (self.dev_id,))
+                # One birth and one real offline transition; heartbeat rows are absent.
+                self.assertEqual(cur.fetchone(), (2, True))
+
+    def test_birth_clears_stale_fast_presence_deadline(self):
+        boot = "a1b2c3d4"
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                update_device_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                       received_at=self.t0, explicit_state="online")
+                update_fast_presence(cur, device_id=self.dev_id, boot_id=boot, seq=5,
+                                     received_at=self.t0 + timedelta(seconds=1))
+                # Retained/reconnect birth must disarm the old deadline until
+                # the new live presence stream is observed.
+                update_device_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                       received_at=self.t0 + timedelta(seconds=10),
+                                       explicit_state="online", seq=10)
+                self.assertEqual(update_fast_presence(
+                    cur, device_id=self.dev_id, boot_id=boot, seq=5,
+                    received_at=self.t0 + timedelta(seconds=11)), 0)
+                self.assertEqual(reconcile_fast_presence_timeouts(
+                    cur, self.t0 + timedelta(seconds=20), [self.dev_id], 4), 0)
+                cur.execute("SELECT presence_received_at FROM device_status WHERE device_id=%s",
+                            (self.dev_id,))
+                self.assertIsNone(cur.fetchone()[0])
+            conn.commit()
+
+    def test_legacy_device_without_presence_keeps_120_second_timeout(self):
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                update_device_presence(cur, device_id=self.dev_id, boot_id=self.boot_id,
+                                       received_at=self.t0, explicit_state="online")
+                self.assertEqual(reconcile_fast_presence_timeouts(
+                    cur, self.t0 + timedelta(seconds=30), [self.dev_id], 4), 0)
+                self.assertEqual(reconcile_device_timeouts(
+                    cur, self.t0 + timedelta(seconds=119), device_id=self.dev_id), 0)
+                self.assertEqual(reconcile_device_timeouts(
+                    cur, self.t0 + timedelta(seconds=121), device_id=self.dev_id), 1)
+            conn.commit()
+        self.assertEqual(self.get_status()[0], "offline")
+        # Running legacy reconciliation again does not duplicate the transition.
         with db_connection() as conn:
             with conn.cursor() as cur:
                 count = reconcile_device_timeouts(
@@ -166,6 +240,34 @@ class StatusTrackerTests(unittest.TestCase):
             conn.commit()
         self.assertEqual(count, 0)
         self.assertEqual(self.get_history_count("offline"), 1)
+
+    def test_presence_ingestion_is_opt_in_and_never_creates_business_data(self):
+        boot = "a1b2c3d4"
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                update_device_presence(cur, device_id=self.dev_id, boot_id=boot,
+                                       received_at=self.t0, explicit_state="online")
+            conn.commit()
+        payload = {"schema_version": 1, "msg_kind": "presence", "device_id": self.dev_id,
+                   "boot_id": boot, "seq": 10, "ts": "2026-11-03T08:30:00Z",
+                   "ts_source": "ntp", "state": "online", "reason": "heartbeat", "data": {}}
+        topic = f"nw/v1/demo/demo-site/{self.dev_id}/status"
+        with mock.patch.dict(os.environ, {"FAST_PRESENCE_DEVICE_IDS": ""}):
+            self.assertEqual(save_message(topic, payload), 0)
+        with mock.patch.dict(os.environ, {"FAST_PRESENCE_DEVICE_IDS": self.dev_id}), \
+             mock.patch("ingestor.on_telemetry") as telemetry_rule, \
+             mock.patch("ingestor.on_event") as event_rule:
+            self.assertEqual(save_message(topic, payload), 1)
+            telemetry_rule.assert_not_called()
+            event_rule.assert_not_called()
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM telemetry_reports WHERE device_id=%s", (self.dev_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
+                cur.execute("SELECT count(*) FROM device_state_snapshots WHERE device_id=%s", (self.dev_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
+                cur.execute("SELECT count(*) FROM alarm_occurrences WHERE device_id=%s", (self.dev_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
 
     def test_periodic_reconciliation_is_idempotent_per_five_minute_bucket(self):
         with db_connection() as conn:
