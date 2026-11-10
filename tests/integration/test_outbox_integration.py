@@ -24,6 +24,7 @@ class OutboxDatabaseTests(unittest.TestCase):
     def setUp(self):
         self.key = f"test-outbox-{uuid.uuid4().hex}"
         self.status_event_ids = []
+        self.created_rule_history = False
         self.at = datetime(2035, 1, 1)
         with db_connection() as conn:
             with conn.cursor() as cur:
@@ -40,6 +41,14 @@ class OutboxDatabaseTests(unittest.TestCase):
                         ON CONFLICT (system_code,entity_type,internal_id) DO NOTHING""",
                         (entity_type, internal_id, f"TEST-{entity_type}-{uuid.uuid4().hex}",
                          self.rule_version if entity_type == "RULE" else 0))
+                cur.execute("""INSERT INTO integration_identity_mapping_versions
+                    (system_code,entity_type,internal_id,external_id,config_version,identity_hash)
+                    SELECT system_code,entity_type,internal_id,external_id,config_version,%s
+                    FROM integration_identity_mappings
+                    WHERE system_code='nextgrp' AND entity_type='RULE'
+                      AND internal_id='S1_TEMP_HIGH'
+                    ON CONFLICT DO NOTHING RETURNING 1""",("f" * 64,))
+                self.created_rule_history = cur.fetchone() is not None
                 cur.execute("""INSERT INTO alarm_occurrences
                     (alarm_key,episode_key,occurrence_kind,rule_code,device_id,severity,
                      event_type,triggered_at,payload_json)
@@ -65,6 +74,11 @@ class OutboxDatabaseTests(unittest.TestCase):
                                 (self.status_event_ids,))
                 cur.execute("DELETE FROM alarm_outbox WHERE alarm_key=%s", (self.key,))
                 cur.execute("DELETE FROM alarm_occurrences WHERE alarm_key=%s", (self.key,))
+                if self.created_rule_history:
+                    cur.execute("""DELETE FROM integration_identity_mapping_versions
+                        WHERE system_code='nextgrp' AND entity_type='RULE'
+                          AND internal_id='S1_TEMP_HIGH' AND config_version=%s
+                          AND identity_hash=%s""",(self.rule_version,"f" * 64))
                 for entity_type, internal_id in self.mapping_keys:
                     cur.execute("""DELETE FROM integration_identity_mappings
                         WHERE system_code='nextgrp' AND entity_type=%s AND internal_id=%s
@@ -133,12 +147,18 @@ class OutboxDatabaseTests(unittest.TestCase):
                     WHERE system_code='nextgrp' AND entity_type='RULE'
                       AND internal_id='S1_TEMP_HIGH'""")
             conn.commit()
-        unconfirmed = OutboxStore(min_id_exclusive=self.row_id - 1, not_before=self.at,
+        # Migration 019 preserves the mapping version that was confirmed when
+        # the episode was created. Revoking the current pointer must not erase
+        # that immutable provenance, but the explicit arm scope still applies.
+        frozen_history = OutboxStore(min_id_exclusive=self.row_id - 1, not_before=self.at,
             approved_org=self.org, approved_devices=("TH-001", "DR-001"),
             approved_rules=("S1_TEMP_HIGH", "S6_DOOR_OPEN"))
-        self.assertEqual(unconfirmed.claim("armed-unconfirmed", 10, 60, self.at), [])
+        historical_claim=frozen_history.claim("armed-history", 10, 60, self.at)
+        self.assertEqual([row[0] for row in historical_claim],[self.row_id])
         with db_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("""UPDATE alarm_outbox SET delivery_state='PENDING',locked_by=NULL,
+                    locked_until=NULL,attempt_count=0 WHERE id=%s""",(self.row_id,))
                 cur.execute("""UPDATE integration_identity_mappings SET confirmed=TRUE
                     WHERE system_code='nextgrp' AND entity_type='RULE'
                       AND internal_id='S1_TEMP_HIGH'""")

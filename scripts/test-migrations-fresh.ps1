@@ -24,7 +24,8 @@ try {
       -e DB_PASSWORD=migration-test-only-password -e RUN_DB_TESTS=1 `
       data-plane python -m unittest -v tests.integration.test_ingestor_contract `
       tests.integration.test_rule_engine_integration tests.integration.test_outbox_integration `
-      tests.integration.test_status_tracker tests.integration.test_multi_site_integration
+      tests.integration.test_rule_version_freeze tests.integration.test_status_tracker `
+      tests.integration.test_multi_site_integration
     if ($LASTEXITCODE -ne 0) { throw 'Fresh-schema ingestion/rule tests failed' }
 
     docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
@@ -61,6 +62,26 @@ try {
       docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
         -U nw_user -d nextwireless
     if ($LASTEXITCODE -ne 0) { throw 'Realtime Event Outbox reapply failed' }
+
+    # This project is disposable. Remove test-generated episodes before testing
+    # the permitted (pre-acceptance) rollback path; production rollback must
+    # remain blocked once frozen provenance has been used.
+    docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+      -U nw_user -d nextwireless -c `
+      "DELETE FROM alarm_outbox; DELETE FROM alarm_occurrences; DELETE FROM alarm_episode_mappings; UPDATE rule_runtime_state SET hold_started_at=NULL,is_active=FALSE,recovery_started_at=NULL,episode_key=NULL,episode_started_at=NULL,current_state=NULL,frozen_rule_version=NULL,frozen_rule_payload_hash=NULL,frozen_rule_config_json=NULL,frozen_identity_json=NULL,episode_provenance=NULL;"
+    if ($LASTEXITCODE -ne 0) { throw 'Isolated Rule episode cleanup failed' }
+    Get-Content -LiteralPath (Join-Path $root 'db/rollback/019_rule_version_episode_freeze.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Rule episode freeze rollback failed' }
+    docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+      -U nw_user -d nextwireless -c `
+      "SELECT to_regclass('public.integration_identity_mapping_versions') IS NULL AS rollback_removed_mapping_history;"
+    if ($LASTEXITCODE -ne 0) { throw 'Rule episode freeze rollback verification failed' }
+    Get-Content -LiteralPath (Join-Path $root 'db/migrations/019_rule_version_episode_freeze.sql') -Raw | `
+      docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `
+        -U nw_user -d nextwireless
+    if ($LASTEXITCODE -ne 0) { throw 'Rule episode freeze reapply failed' }
 
     Get-Content -LiteralPath (Join-Path $root 'db/rollback/016_retention_configuration.sql') -Raw | `
       docker compose -p $ProjectName exec -T postgres psql -v ON_ERROR_STOP=1 `

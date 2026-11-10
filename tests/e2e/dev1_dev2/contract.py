@@ -79,8 +79,10 @@ def validate_config(config, expected_device_id):
         _version(rule.get("version"), "rule.version")
         if rule.get("scope_type", "Device").upper() != "DEVICE" or rule.get("scope_ref") != expected_device_id:
             raise ValueError("rule scope does not match device")
-        if not isinstance(rule.get("active"), bool):
-            raise ValueError("rule active must be boolean")
+        active=rule.get("active")
+        if not (isinstance(active,bool) or
+                (isinstance(active,int) and not isinstance(active,bool) and active in (0,1))):
+            raise ValueError("rule active must be boolean or integer 0/1")
         if rule.get("threshold") is not None and (isinstance(rule["threshold"], bool)
                                                    or not isinstance(rule["threshold"], (int, float))):
             raise ValueError("threshold must be numeric")

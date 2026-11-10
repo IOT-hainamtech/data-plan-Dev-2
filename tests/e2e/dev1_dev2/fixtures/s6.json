@@ -3,6 +3,7 @@
   "config": {
     "device": {
       "device_id": "NW-IT-DR001",
+      "external_id": "DR-001",
       "site": "NW-LOCAL-SITE-001",
       "zone": null,
       "status": "Active",
@@ -11,7 +12,8 @@
     },
     "site": {"organization": "NW-LOCAL-ORG-001"},
     "profile": {
-      "profile_code": "NW-IT-S6",
+      "profile_code": "NW-LOCAL-S6",
+      "external_id": "DOOR_SENSOR",
       "version": 1,
       "supports_telemetry": true,
       "data_points": [{"code": "door_state", "data_type": "string", "allowed_values": ["open", "closed"], "required": true}],
@@ -22,6 +24,7 @@
     },
     "rules": [{
       "rule_id": "NW-IT-RULE-S6",
+      "external_id": "S6_DOOR_OPEN",
       "version": 1,
       "rule_type": "STATE_CHANGE",
       "scope_type": "Device",
@@ -36,7 +39,7 @@
       "business_start": "08:00:00",
       "business_end": "18:00:00",
       "schedule_timezone": "Asia/Ho_Chi_Minh",
-      "active": true
+      "active": 1
     }]
   },
   "status": {

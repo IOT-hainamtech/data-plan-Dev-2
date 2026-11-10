@@ -8,10 +8,14 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+import os
 from dataclasses import dataclass
 
 
 METHOD_PREFIX = "/api/method/nextgrp.nextgrp_iot.controller."
+DEFAULT_STATUS_METHOD = "nextwireless_dashboard.api.ingestion.receive_status"
+DEFAULT_DEVICE_EVENT_METHOD = "nextwireless_dashboard.api.ingestion.receive_device_event"
+DEFAULT_ALARM_METHOD = "nextwireless_dashboard.api.ingestion.receive_alarm"
 
 
 def validate_and_normalize_credentials(token=None, *, api_key=None, api_secret=None):
@@ -71,7 +75,8 @@ class FrappeClient:
 
     def __init__(self, base_url, site_name, token=None, timeout=5, *, org_code=None,
                  api_key=None, api_secret=None, allow_http_lan=False,
-                 opener=urllib.request.urlopen):
+                 opener=urllib.request.urlopen, device_event_method=None,
+                 status_method=None, alarm_method=None):
         base_url = base_url.rstrip("/")
         if not base_url.startswith("https://") and not allow_http_lan:
             raise ValueError("Dev 1 requires HTTPS unless test-only HTTP LAN opt-in is enabled")
@@ -83,14 +88,46 @@ class FrappeClient:
         self.org_code = org_code
         self.timeout, self.opener = float(timeout), opener
 
+        configured_device_event = (device_event_method or
+                                   os.getenv("DEV1_DEVICE_EVENT_METHOD") or
+                                   DEFAULT_DEVICE_EVENT_METHOD)
+        if (not isinstance(configured_device_event, str) or not configured_device_event.strip()
+                or configured_device_event != configured_device_event.strip()
+                or any(c in configured_device_event for c in "\r\n/?#")):
+            raise ValueError("Dev 1 Device Event method is invalid")
+
+        configured_status = status_method or os.getenv("DEV1_STATUS_METHOD")
+        if configured_status is not None:
+            if (not isinstance(configured_status, str) or not configured_status.strip()
+                    or configured_status != configured_status.strip()
+                    or any(c in configured_status for c in "\r\n/?#")):
+                raise ValueError("Dev 1 Status method is invalid")
+
+        configured_alarm = alarm_method or os.getenv("DEV1_ALARM_METHOD")
+        if configured_alarm is not None:
+            if (not isinstance(configured_alarm, str) or not configured_alarm.strip()
+                    or configured_alarm != configured_alarm.strip()
+                    or any(c in configured_alarm for c in "\r\n/?#")):
+                raise ValueError("Dev 1 Alarm method is invalid")
+
+        self.methods = dict(self.METHODS)
+        self.methods["device_event"] = configured_device_event
+        if configured_status:
+            self.methods["status"] = configured_status
+        if configured_alarm:
+            self.methods["alarm"] = configured_alarm
+
     def __repr__(self):
         return f"<FrappeClient base_url={self.base_url!r} site={self.site_name!r}>"
 
     def method_url(self, name):
         try:
-            method = self.METHODS[name]
+            method = self.methods[name]
         except KeyError as exc:
             raise ValueError("unknown Dev 1 method") from exc
+        if name == "device_event" or ("." in method and ("nextwireless_dashboard." in method or method.startswith("/api/method/"))):
+            endpoint = method if not method.startswith("/api/method/") else method[len("/api/method/"):]
+            return self.base_url + "/api/method/" + endpoint
         return self.base_url + METHOD_PREFIX + method
 
     def _request(self, name, *, query=None, form=None, json_body=None):

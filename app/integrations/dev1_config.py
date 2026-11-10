@@ -89,6 +89,99 @@ def resolve_internal_mapping(cur, entity_type, external_id, system_code="nextgrp
     return row
 
 
+def _contract_bool(value, field):
+    """Accept Frappe's documented 0/1 representation without truthy coercion."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{field} must be boolean or integer 0/1")
+
+
+def _require_external_id(resource, expected, label):
+    external_id = resource.get("external_id")
+    if external_id is not None:
+        if not isinstance(external_id, str) or not external_id.strip():
+            raise ValueError(f"Dev 1 {label} has invalid external_id")
+        if external_id != expected:
+            raise ValueError(f"Dev 1 {label} external_id does not match confirmed mapping")
+
+
+def _resolve_rule_event_type(rule_id, kind, event_payload=None, cur=None, runtime_config=None):
+    """Resolve confirmed Dev 1 event_type for rule transition without unconfirmed guessing."""
+    confirmed_events = {
+        ("S1_TEMP_HIGH", "occurrence"): "TEMP_HIGH",
+        ("S1_TEMP_HIGH", "cleared"): "TEMP_NORMAL",
+        ("S6_DOOR_OPEN", "occurrence"): "DOOR_OPENED",
+        ("S6_DOOR_OPEN", "cleared"): "DOOR_CLOSED",
+    }
+    match = confirmed_events.get((rule_id, kind))
+    if match:
+        return match
+
+    rule_kind = None
+    event_type = None
+    metric = None
+    if isinstance(runtime_config, str):
+        try:
+            runtime_config = json.loads(runtime_config)
+        except Exception:
+            runtime_config = None
+    if isinstance(runtime_config, dict):
+        rule_kind = runtime_config.get("rule_kind") or runtime_config.get("rule_type")
+        event_type = runtime_config.get("event_type")
+        metric = runtime_config.get("metric") or runtime_config.get("data_point")
+    elif cur:
+        try:
+            cur.execute("SELECT rule_kind, metric, event_type FROM rule_definitions WHERE rule_code=%s", (rule_id,))
+            row = cur.fetchone()
+            if row:
+                rule_kind, metric, event_type = row
+        except Exception:
+            pass
+
+    if rule_kind == "STATE_CHANGE" and event_type:
+        if kind == "occurrence":
+            return event_type
+        if event_type == "DOOR_OPENED":
+            return "DOOR_CLOSED"
+        event_obj = event_payload if isinstance(event_payload, dict) else {}
+        if event_obj.get("event_type") and event_obj.get("event_type") != event_type:
+            return event_obj["event_type"]
+        return f"{event_type}_CLEARED" if not event_type.endswith("_CLEARED") else event_type
+
+    if rule_kind == "THRESHOLD" and metric:
+        return f"{metric.upper()}_HIGH" if kind == "occurrence" else f"{metric.upper()}_NORMAL"
+
+    if isinstance(event_payload, dict) and event_payload.get("event_type"):
+        return event_payload["event_type"]
+
+    return None
+
+
+def _protect_runtime_profile(cur, profile_code, profile_data):
+    """Fail closed when a snapshot would reinterpret the physical signal model."""
+    cur.execute("""SELECT channel,point_code,data_type,unit,min_value,max_value,
+            allowed_values,required FROM device_profile_points
+        WHERE profile_code=%s ORDER BY channel,point_code""", (profile_code,))
+    current_points=cur.fetchall()
+    cur.execute("""SELECT event_type,state_point,state_value FROM device_profile_events
+        WHERE profile_code=%s ORDER BY event_type""", (profile_code,))
+    current_events=cur.fetchall()
+    if not current_points and not current_events:
+        return
+    incoming_points=sorted((p["channel"],p["code"],p["data_type"],p.get("unit"),
+        p.get("min_value"),p.get("max_value"),p.get("allowed_values"),p["required"])
+        for p in profile_data["data_points"])
+    normalized_current=sorted((channel,code,data_type,unit,min_value,max_value,
+        list(allowed_values) if allowed_values is not None else None,required)
+        for channel,code,data_type,unit,min_value,max_value,allowed_values,required in current_points)
+    incoming_events=sorted((e["event_type"],e.get("state_point"),e.get("state_value"))
+                           for e in profile_data["event_types"])
+    if incoming_points != normalized_current or incoming_events != sorted(current_events):
+        raise ValueError("Dev 1 Profile schema conflicts with the protected runtime Profile")
+
+
 def resolve_internal_alarm_key(cur, callback_alarm_key):
     """Resolve an IF-06 key without guessing across the Dev 1/Dev 2 boundary.
 
@@ -124,6 +217,8 @@ def reconcile_device_config(cur, config, system_code="nextgrp"):
     site_code, _ = resolve_internal_mapping(cur, "SITE", device["site"], system_code)
     device_id, _ = resolve_internal_mapping(cur, "DEVICE", device["device_id"], system_code)
     profile_code, _ = resolve_internal_mapping(cur, "PROFILE", profile["profile_code"], system_code)
+    _require_external_id(device, device_id, "Device")
+    _require_external_id(profile, profile_code, "Profile")
     zone_external = device.get("zone")
     if zone_external:
         zone_code, _ = resolve_internal_mapping(cur, "ZONE", zone_external, system_code)
@@ -146,9 +241,11 @@ def reconcile_device_config(cur, config, system_code="nextgrp"):
             "data_type": point.get("data_type", "number"), "unit": point.get("unit"),
             "min_value": point.get("min"), "max_value": point.get("max"),
             "allowed_values": point.get("allowed_values"),
-            "required": bool(point.get("required", True)),
+            "required": _contract_bool(point.get("required", 1), "profile.data_points[].required"),
             "precision": point.get("precision"), "metadata": {"label": point.get("label", code)}})
-    if bool(profile.get("supports_telemetry")) != bool(points):
+    supports_telemetry=_contract_bool(profile.get("supports_telemetry"),
+                                      "profile.supports_telemetry")
+    if supports_telemetry != bool(points):
         raise ValueError("Dev 1 supports_telemetry conflicts with Profile data_points")
     events = []
     for event in profile.get("event_types") or []:
@@ -166,6 +263,7 @@ def reconcile_device_config(cur, config, system_code="nextgrp"):
             "heartbeat_interval_s": profile.get("heartbeat_interval_s", 60),
             "offline_after_missed": profile.get("offline_after_missed", 2)},
         "data_points": points, "event_types": events}
+    _protect_runtime_profile(cur,profile_code,profile_data)
     results = [apply_profile(cur, profile_data)]
     device_data = {"device_id": device_id, "org_code": org, "site_code": site_code,
         "zone_code": zone_code, "profile_code": profile_code,
@@ -178,6 +276,7 @@ def reconcile_device_config(cur, config, system_code="nextgrp"):
     results.append(apply_device(cur, device_data))
     for rule in config.get("rules") or []:
         rule_id, _ = resolve_internal_mapping(cur, "RULE", rule["rule_id"], system_code)
+        _require_external_id(rule,rule_id,"Rule")
         scope_type = str(rule.get("scope_type", "Device")).upper()
         if scope_type != "DEVICE" or rule.get("scope_ref") != device["device_id"]:
             raise ValueError("get_device_config Rule must be scoped to the requested Device")
@@ -206,9 +305,11 @@ def reconcile_device_config(cur, config, system_code="nextgrp"):
             "event_type": rule.get("event_type"), "open_limit_s": rule.get("open_limit_s"),
             "business_start": business_start, "business_end": business_end,
             "timezone": schedule_timezone,
-            "severity": rule.get("severity", "High"), "auto_close": bool(rule.get("auto_close")),
-            "enabled": bool(rule.get("active", True))}
-        results.append(apply_rule(cur, rule_data))
+            "severity": rule.get("severity", "High"),
+            "auto_close": _contract_bool(rule.get("auto_close", 0), "rules[].auto_close"),
+            "enabled": _contract_bool(rule.get("active", 1), "rules[].active")}
+        results.append(apply_rule(cur, rule_data, sync_mapping=True,
+                                  mapping_external_id=rule["rule_id"]))
     return results
 
 
@@ -220,20 +321,13 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
     if payload.get("kind") == "cleared":
         cur.execute("""SELECT payload_json FROM alarm_outbox
             WHERE wire_alarm_key=%s AND payload_json->>'kind'='occurrence'
-              AND payload_json->>'alarm_key'<>%s
-            ORDER BY id LIMIT 1""", (payload["alarm_key"], payload["alarm_key"]))
+              AND delivery_state='DELIVERED'
+            ORDER BY id LIMIT 1""", (payload["alarm_key"],))
         prior = cur.fetchone()
     if prior:
         frozen = prior[0]
-        cur.execute("""SELECT config_version,config_json FROM rule_definitions
-            WHERE rule_code=%s AND enabled=TRUE""", (payload["rule_id"],))
-        runtime_rule = cur.fetchone()
-        if not runtime_rule:
-            raise LookupError("enabled runtime Rule is missing")
-        runtime_version, runtime_config = runtime_rule
-        if (payload.get("rule_version") != runtime_version
-                or frozen.get("rule_version") != runtime_version):
-            raise ValueError("runtime, cleared payload and frozen occurrence Rule versions must match")
+        if payload.get("rule_version") != frozen.get("rule_version"):
+            raise ValueError("cleared payload must retain the frozen occurrence Rule version")
         mapped = deepcopy(payload)
         mapped.update({key: frozen.get(key) for key in
             ("org_code", "device_id", "rule_id", "rule_version",
@@ -241,15 +335,40 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
         mapped.pop("zone_code", None)
         mapped.pop("site_code", None)
         if mapped.get("event"):
-            event_type = {
-                "S1_TEMP_HIGH": "TEMP_NORMAL",
-                "S6_DOOR_OPEN": "DOOR_CLOSED",
-            }.get(payload["rule_id"])
+            event_type = _resolve_rule_event_type(payload["rule_id"], "cleared", mapped.get("event"), cur=cur)
             if event_type is None:
                 raise ValueError("Unconfirmed cleared event_type")
             mapped["event"]["event_type"] = event_type
         return mapped
     mapped = deepcopy(payload)
+    episode_mapping=None
+    if payload.get("alarm_key"):
+        cur.execute("""SELECT frozen_rule_version,frozen_identity_json,episode_provenance
+            FROM alarm_episode_mappings WHERE wire_alarm_key=%s""", (payload["alarm_key"],))
+        episode_mapping=cur.fetchone()
+    if episode_mapping and episode_mapping[2] == "FROZEN":
+        frozen_version,identity,_=episode_mapping
+        identity=identity or {}
+        rule=identity.get("external_rule_id")
+        device=identity.get("external_device_id")
+        if not rule or not device or payload.get("rule_version") != frozen_version:
+            raise ValueError("frozen episode integration identity is incomplete")
+        started = datetime.fromisoformat(payload["episode_start"].replace("Z", "+00:00"))
+        epoch = int(started.astimezone(timezone.utc).timestamp())
+        external_key=f"{rule}:{device}:{epoch}"
+        org=identity.get("external_org_code")
+        if not org:
+            raise ValueError("frozen episode Organization identity is incomplete")
+        mapped.update({"org_code":org,"device_id":device,"rule_id":rule,
+                       "rule_version":frozen_version,"alarm_key":external_key,
+                       "episode_key":external_key})
+        mapped.pop("zone_code",None); mapped.pop("site_code",None)
+        if mapped.get("event"):
+            event_type = _resolve_rule_event_type(payload["rule_id"], payload.get("kind"), mapped.get("event"), cur=cur)
+            if event_type is None:
+                raise ValueError("Dev 1 event_type is not confirmed for this Rule transition")
+            mapped["event"]["event_type"]=event_type
+        return mapped
     cur.execute("""SELECT config_version,config_json FROM rule_definitions
         WHERE rule_code=%s AND enabled=TRUE""", (payload["rule_id"],))
     runtime_rule = cur.fetchone()
@@ -272,13 +391,9 @@ def map_alarm_payload(cur, payload, system_code="nextgrp"):
     mapped.pop("zone_code", None)
     mapped.pop("site_code", None)
     if mapped.get("event"):
-        event_types = {
-            ("S1_TEMP_HIGH", "occurrence"): "TEMP_HIGH",
-            ("S1_TEMP_HIGH", "cleared"): "TEMP_NORMAL",
-            ("S6_DOOR_OPEN", "occurrence"): "DOOR_OPENED",
-            ("S6_DOOR_OPEN", "cleared"): "DOOR_CLOSED",
-        }
-        event_type = event_types.get((payload["rule_id"], payload.get("kind")))
+        event_type = _resolve_rule_event_type(
+            payload["rule_id"], payload.get("kind"), mapped.get("event"), cur=cur, runtime_config=runtime_config
+        )
         if event_type is None:
             raise ValueError("Dev 1 event_type is not confirmed for this Rule transition")
         mapped["event"]["event_type"] = event_type

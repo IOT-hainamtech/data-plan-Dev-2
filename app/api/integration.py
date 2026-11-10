@@ -74,7 +74,8 @@ def sync_device(device_id:str,body:DeviceIn,org:str=Depends(service_context)):
     return _apply(body,org,{"device_id":device_id},apply_device)
 @router.put("/sync/rules/{rule_id}")
 def sync_rule(rule_id:str,body:RuleIn,org:str=Depends(service_context)):
-    return _apply(body,org,{"rule_id":rule_id},apply_rule)
+    return _apply(body,org,{"rule_id":rule_id},
+                  lambda cur,data: apply_rule(cur,data,sync_mapping=True))
 
 @router.post("/alarms/{alarm_key}/state")
 def alarm_state(alarm_key:str,body:AlarmStateIn,org:str=Depends(service_context)):

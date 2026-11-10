@@ -1,0 +1,146 @@
+[
+  {
+    "system_code": "nextgrp",
+    "entity_type": "ORGANIZATION",
+    "internal_id": "hainam",
+    "external_id": "NW-LOCAL-ORG-001",
+    "config_version": 0,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "source": "dev1-confirmed-if05",
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "SITE",
+    "internal_id": "hq",
+    "external_id": "NW-LOCAL-SITE-001",
+    "config_version": 1,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "org_code": "hainam",
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "PROFILE",
+    "internal_id": "TEMP_HUM_SENSOR",
+    "external_id": "NW-LOCAL-S1",
+    "config_version": 1,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "signal_model": "TELEMETRY",
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "PROFILE",
+    "internal_id": "DOOR_SENSOR",
+    "external_id": "NW-LOCAL-S6",
+    "config_version": 1,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "signal_model": "EVENT",
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "DEVICE",
+    "internal_id": "TH-001",
+    "external_id": "NW-IT-TH001",
+    "config_version": 0,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "org_code": "hainam",
+      "site_code": "hq",
+      "profile_code": "TEMP_HUM_SENSOR",
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "DEVICE",
+    "internal_id": "DR-001",
+    "external_id": "NW-IT-DR001",
+    "config_version": 0,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "org_code": "hainam",
+      "site_code": "hq",
+      "profile_code": "DOOR_SENSOR",
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "RULE",
+    "internal_id": "S1_TEMP_HIGH",
+    "external_id": "NW-IT-RULE-S1",
+    "config_version": 4,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "rule_kind": "THRESHOLD",
+      "metric": "temperature",
+      "hold_seconds": 0,
+      "threshold": 30.0,
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "RULE",
+    "internal_id": "S6_DOOR_OPEN",
+    "external_id": "NW-IT-RULE-S6",
+    "config_version": 3,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "rule_kind": "STATE_CHANGE",
+      "event_type": "DOOR_OPENED",
+      "hold_seconds": 300,
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "RULE",
+    "internal_id": "ML-LIVE-S6-f2dc024bb2",
+    "external_id": "ML-LIVE-S6-f2dc024bb2",
+    "config_version": 1,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "rule_kind": "STATE_CHANGE",
+      "event_type": "AI_ANOMALY_DETECTED",
+      "hold_seconds": 0,
+      "verified_by": "operator"
+    }
+  },
+  {
+    "system_code": "nextgrp",
+    "entity_type": "RULE",
+    "internal_id": "NW-IT-RULE-S12",
+    "external_id": "NW-IT-RULE-S12",
+    "config_version": 1,
+    "confirmed": true,
+    "enabled": true,
+    "metadata": {
+      "rule_kind": "THRESHOLD",
+      "metric": "temperature",
+      "hold_seconds": 300,
+      "threshold": 30.0,
+      "verified_by": "operator"
+    }
+  }
+]

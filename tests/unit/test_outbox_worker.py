@@ -6,7 +6,7 @@ from unittest.mock import patch
 from integrations.nextgrp import DeliveryResult, FrappeAlarmAdapter, NextGrpAdapter
 from outbox.worker import (OutboxStore, OutboxWorker, alarm_adapter, bridge_settings,
                            approved_delivery_selector, armed_e2e_selector, delivery_not_before,
-                           retry_delay, validate_ack)
+                           require_frappe_delivery_guard, retry_delay, validate_ack)
 
 
 class FakeStore:
@@ -61,6 +61,16 @@ class CapturingConnection:
 
 
 class OutboxUnitTests(unittest.TestCase):
+    def test_frappe_delivery_requires_explicit_selector_or_high_water_scope(self):
+        with patch.dict(os.environ, {"BRIDGE_ALARM_PROTOCOL":"frappe",
+                "FRAPPE_SITE_NAME":"nextgrp.localhost"}, clear=True):
+            adapter = alarm_adapter("real", "https://example.test/receive_alarm",
+                                    "key:secret", 1, False)
+        with self.assertRaisesRegex(ValueError, "requires IF05_APPROVED_OUTBOX_IDS"):
+            require_frappe_delivery_guard(adapter, None, None)
+        require_frappe_delivery_guard(adapter, ((1001,), {}), None)
+        require_frappe_delivery_guard(adapter, None, {"high_water": 1000})
+
     def test_clear_ordering_guard_applies_only_to_alarm_outbox(self):
         alarm_conn = CapturingConnection()
         OutboxStore(lambda: alarm_conn).claim("w", 2, 30, datetime(2035, 1, 1))
@@ -99,7 +109,7 @@ class OutboxUnitTests(unittest.TestCase):
         self.assertIn("approval_occ.device_id", conn.cursor_value.sql)
         self.assertIn("approval_occ.rule_code", conn.cursor_value.sql)
         self.assertIn("approval_rule_map.config_version", conn.cursor_value.sql)
-        self.assertIn("approval_rule_map.confirmed=TRUE", conn.cursor_value.sql)
+        self.assertIn("integration_identity_mapping_versions", conn.cursor_value.sql)
 
     def test_armed_selector_requires_exact_physical_scope_and_watermark(self):
         valid = {"IF05_E2E_ARMED": "true", "IF05_E2E_HIGH_WATER_ID": "956",

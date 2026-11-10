@@ -1,0 +1,158 @@
+# Ubuntu/company-demo deployment overlay. Use only with compose.yaml.
+# Local Windows overrides are deliberately not included.
+name: ${COMPOSE_PROJECT_NAME:-nextwireless-dev2}
+
+x-core-hardening: &core-hardening
+  init: true
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  mqtt-ca-init:
+    mem_limit: 32m
+    mem_reservation: 16m
+    cpus: 0.10
+
+  postgres:
+    <<: *core-hardening
+    mem_limit: 640m
+    mem_reservation: 384m
+    cpus: 0.75
+    shm_size: 64m
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=40
+
+  mqtt:
+    <<: *core-hardening
+    mem_limit: 96m
+    mem_reservation: 48m
+    cpus: 0.25
+    ports: !override
+      - "${MQTT_BIND_IP:-127.0.0.1}:${MQTT_PORT:-8883}:8883"
+
+  data-plane:
+    <<: *core-hardening
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    mem_limit: 384m
+    mem_reservation: 192m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "python", "-c", "from core.database import db_connection; c=db_connection(); c.close()"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 40s
+
+  data-api:
+    <<: *core-hardening
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 0.50
+    ports: !override
+      - "${DATA_API_BIND_IP:-127.0.0.1}:${DATA_API_PORT:-8002}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  data-api-tls:
+    mem_limit: 64m
+    mem_reservation: 32m
+    cpus: 0.20
+
+  snapshot-worker:
+    <<: *core-hardening
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    profiles: ["integration"]
+    mem_limit: 192m
+    mem_reservation: 96m
+    cpus: 0.25
+    environment:
+      BRIDGE_SNAPSHOT_TOKEN: ${DEV1_API_KEY:-}:${DEV1_API_SECRET:-}
+
+  outbox-worker:
+    <<: *core-hardening
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    mem_limit: 192m
+    mem_reservation: 96m
+    cpus: 0.25
+    environment:
+      OUTBOX_DELIVERY_ENABLED: ${OUTBOX_DELIVERY_ENABLED:-false}
+      BRIDGE_MODE: ${BRIDGE_MODE:-mock}
+      BRIDGE_ALARM_PROTOCOL: ${BRIDGE_ALARM_PROTOCOL:-mock}
+      BRIDGE_ALARM_URL: ${BRIDGE_ALARM_URL:-}
+      BRIDGE_STATUS_URL: ${BRIDGE_STATUS_URL:-}
+      BRIDGE_OUTBOUND_TOKEN: ${DEV1_API_KEY:-}:${DEV1_API_SECRET:-}
+      FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:-}
+      IF05_E2E_ARMED: ${IF05_E2E_ARMED:-false}
+      IF05_E2E_HIGH_WATER_ID: ${IF05_E2E_HIGH_WATER_ID:-}
+      IF05_E2E_ARMED_AT: ${IF05_E2E_ARMED_AT:-}
+      IF05_E2E_ORG: ${IF05_E2E_ORG:-}
+      IF05_E2E_DEVICES: ${IF05_E2E_DEVICES:-}
+      IF05_E2E_RULES: ${IF05_E2E_RULES:-}
+
+  realtime-worker:
+    <<: *core-hardening
+    profiles: ["realtime"]
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    restart: unless-stopped
+    mem_limit: 192m
+    mem_reservation: 96m
+    cpus: 0.25
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: nextwireless
+      DB_USER: nw_user
+      DB_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      DEV1_BASE_URL: ${DEV1_BASE_URL:-}
+      DEV1_API_KEY: ${DEV1_API_KEY:-}
+      DEV1_API_SECRET: ${DEV1_API_SECRET:-}
+      DEV1_DEVICE_EVENT_METHOD: ${DEV1_DEVICE_EVENT_METHOD:-nextwireless_dashboard.api.ingestion.receive_device_event}
+      FRAPPE_SITE_NAME: ${FRAPPE_SITE_NAME:-}
+      REALTIME_E2E_ARMED: ${REALTIME_E2E_ARMED:-false}
+      REALTIME_EVENT_HIGH_WATER_ID: ${REALTIME_EVENT_HIGH_WATER_ID:-}
+      REALTIME_STATUS_HIGH_WATER_ID: ${REALTIME_STATUS_HIGH_WATER_ID:-}
+      REALTIME_ARMED_AT: ${REALTIME_ARMED_AT:-}
+      REALTIME_ORG: ${REALTIME_ORG:-}
+      REALTIME_DEVICES: ${REALTIME_DEVICES:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-plane:
+        condition: service_healthy
+    command: ["python", "-u", "realtime_worker.py"]
+
+  simulator:
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    mem_limit: 128m
+    mem_reservation: 64m
+    cpus: 0.20
+
+  mock-nextgrp:
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    mem_limit: 128m
+    mem_reservation: 64m
+    cpus: 0.20
+
+  mqtt-security-test:
+    image: ${APP_IMAGE:?Set APP_IMAGE to the approved Data Plane image}
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 0.50

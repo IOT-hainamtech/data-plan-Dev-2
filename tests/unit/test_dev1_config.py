@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.dev1_config import (Dev1ConfigClient, map_alarm_payload,
+                                      _protect_runtime_profile,
                                       reconcile_device_config,
                                       resolve_confirmed_mapping,
                                       resolve_internal_alarm_key)
@@ -48,11 +49,13 @@ class ReverseCursor:
             ("RULE", "NW-LOCAL-RULE-S6"): ("S6_DOOR_OPEN", 1),
         }
     def execute(self, sql, args):
+        self.row = None
         if "external_id=%s" in sql:
             self.row = self.mappings.get((args[1], args[2]))
         elif "SELECT zone_code" in sql:
             self.row = ("LAB",)
     def fetchone(self): return self.row
+    def fetchall(self): return []
 
 
 class AlarmKeyCursor:
@@ -64,6 +67,71 @@ class AlarmKeyCursor:
 
 
 class Dev1ConfigTests(unittest.TestCase):
+    def test_cleared_reuses_only_delivered_frozen_occurrence(self):
+        class Cursor:
+            def execute(self,sql,args):
+                self.sql=sql
+                self.row=({"org_code":"NW-LOCAL-ORG-001",
+                    "device_id":"NW-IT-TH001","rule_id":"NW-IT-RULE-S1",
+                    "rule_version":4,"alarm_key":"external-episode",
+                    "episode_key":"external-episode"},)
+            def fetchone(self): return self.row
+        cursor=Cursor()
+        payload={"alarm_key":"internal-wire","episode_key":"internal-wire",
+            "kind":"cleared","org_code":"hainam","device_id":"TH-001",
+            "rule_id":"S1_TEMP_HIGH","rule_version":4,
+            "event":{"event_type":"THRESHOLD_CLEARED"}}
+        mapped=map_alarm_payload(cursor,payload)
+        self.assertIn("delivery_state='DELIVERED'",cursor.sql)
+        self.assertEqual(mapped["alarm_key"],"external-episode")
+        self.assertEqual(mapped["event"]["event_type"],"TEMP_NORMAL")
+
+    def test_occurrence_uses_episode_frozen_identity_after_mapping_advances(self):
+        class FrozenCursor:
+            def execute(self,sql,args):
+                self.row=(4,{"external_rule_id":"NW-IT-RULE-S1",
+                    "external_device_id":"NW-IT-TH001",
+                    "external_org_code":"NW-LOCAL-ORG-001"},"FROZEN")
+            def fetchone(self): return self.row
+        payload={"alarm_key":"S1_TEMP_HIGH:TH-001:1","episode_key":"same",
+            "episode_start":"2026-11-05T01:00:00Z","kind":"occurrence",
+            "org_code":"hainam","device_id":"TH-001","rule_id":"S1_TEMP_HIGH",
+            "rule_version":4,"event":{"event_type":"THRESHOLD_EXCEEDED"}}
+        mapped=map_alarm_payload(FrozenCursor(),payload)
+        self.assertEqual((mapped["rule_id"],mapped["device_id"],mapped["rule_version"]),
+                         ("NW-IT-RULE-S1","NW-IT-TH001",4))
+        self.assertEqual(mapped["org_code"],"NW-LOCAL-ORG-001")
+
+    def test_profile_schema_conflict_is_fail_closed_before_apply(self):
+        class ProfileCursor:
+            def execute(self,sql,args): self.events="device_profile_events" in sql
+            def fetchall(self):
+                return [] if self.events else [("telemetry","door_state","string",None,None,None,
+                                                ["open","closed"],True)]
+        incoming={"data_points":[{"channel":"telemetry","code":"door_state",
+            "data_type":"boolean","unit":None,"min_value":None,"max_value":None,
+            "allowed_values":None,"required":True}],"event_types":[]}
+        with self.assertRaisesRegex(ValueError,"conflicts"):
+            _protect_runtime_profile(ProfileCursor(),"DOOR_SENSOR",incoming)
+
+    def test_snapshot_unmapped_ai_rule_fails_closed(self):
+        config={"device":{"device_id":"NW-LOCAL-TH001","external_id":"TH-001",
+            "site":"NW-LOCAL-SITE-001","zone":None,"status":"Active",
+            "connectivity_type":"WIFI","config_version":1},
+            "site":{"organization":"NW-LOCAL-ORG-001"},
+            "profile":{"profile_code":"NW-LOCAL-S1","external_id":"TEMP_HUM_SENSOR",
+                "version":1,"supports_telemetry":1,"data_points":[
+                    {"code":"temperature"},{"code":"humidity"}],"event_types":[]},
+            "rules":[{"rule_id":"ML-LIVE-UNMAPPED","external_id":"ML-INTERNAL",
+                "version":1,"rule_type":"THRESHOLD","scope_type":"Device",
+                "scope_ref":"NW-LOCAL-TH001","data_point":"temperature",
+                "threshold":30,"active":1}]}
+        with patch("integrations.dev1_config._protect_runtime_profile"), \
+             patch("integrations.dev1_config.apply_profile",return_value={}), \
+             patch("integrations.dev1_config.apply_device",return_value={}), \
+             self.assertRaisesRegex(LookupError,"RULE"):
+            reconcile_device_config(ReverseCursor(),config)
+
     def test_fetch_uses_actual_frappe_shape_and_auth(self):
         seen = {}
         body = {"message": {"device": {"device_id": "NW-LOCAL-TH001",
@@ -201,21 +269,21 @@ class Dev1ConfigTests(unittest.TestCase):
                 "rule_id": "S6_DOOR_OPEN", "episode_start": "2026-10-30T03:00:00Z"})
 
     def test_actual_device_config_is_mapped_and_applied_as_one_unit(self):
-        config = {"device": {"device_id": "NW-LOCAL-TH001", "device_profile": "NW-LOCAL-S1",
+        config = {"device": {"device_id": "NW-LOCAL-TH001", "external_id": "TH-001", "device_profile": "NW-LOCAL-S1",
             "site": "NW-LOCAL-SITE-001", "zone": None, "status": "Active",
             "connectivity_type": "WIFI", "config_version": 1},
             "site": {"organization": "NW-LOCAL-ORG-001"},
-            "profile": {"profile_code": "NW-LOCAL-S1", "version": 1, "protocol": "MQTT",
+            "profile": {"profile_code": "NW-LOCAL-S1", "external_id": "TEMP_HUM_SENSOR", "version": 1, "protocol": "MQTT",
                 "supports_telemetry": 1, "data_points": [
                     {"code": "temperature", "unit": "Cel"},
                     {"code": "humidity", "unit": "%RH"}], "event_types": []},
-            "rules": [{"rule_id": "NW-LOCAL-RULE-S1", "rule_type": "THRESHOLD",
+            "rules": [{"rule_id": "NW-LOCAL-RULE-S1", "external_id": "S1_TEMP_HIGH", "rule_type": "THRESHOLD",
                 "scope_type": "Device", "scope_ref": "NW-LOCAL-TH001",
                 "data_point": "temperature", "operator": ">", "threshold": 30.0,
                 "severity": "High", "active": 1, "version": 1, "auto_close": 1}]}
         with patch("integrations.dev1_config.apply_profile", side_effect=lambda c, d: ("profile", d)), \
              patch("integrations.dev1_config.apply_device", side_effect=lambda c, d: ("device", d)), \
-             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d: ("rule", d)):
+             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d, **kw: ("rule", d)):
             results = reconcile_device_config(ReverseCursor(), config)
         self.assertEqual([item[0] for item in results], ["profile", "device", "rule"])
         self.assertEqual(results[0][1]["profile_code"], "TEMP_HUM_SENSOR")
@@ -224,15 +292,15 @@ class Dev1ConfigTests(unittest.TestCase):
         self.assertEqual(results[2][1]["version"], 1)
 
     def test_s6_schedule_is_mapped_without_inventing_defaults(self):
-        config = {"device": {"device_id": "NW-LOCAL-DR001", "device_profile": "NW-LOCAL-S6",
+        config = {"device": {"device_id": "NW-LOCAL-DR001", "external_id": "DR-001", "device_profile": "NW-LOCAL-S6",
             "site": "NW-LOCAL-SITE-001", "zone": None, "status": "Active",
             "connectivity_type": "WIFI", "config_version": 2},
             "site": {"organization": "NW-LOCAL-ORG-001"},
-            "profile": {"profile_code": "NW-LOCAL-S6", "version": 2, "protocol": "MQTT",
+            "profile": {"profile_code": "NW-LOCAL-S6", "external_id": "DOOR_SENSOR", "version": 2, "protocol": "MQTT",
                 "supports_telemetry": 1, "data_points": [{"code": "door_state",
                 "data_type": "string", "allowed_values": ["open", "closed"]}],
                 "event_types": ["DOOR_OPENED", "DOOR_CLOSED"]},
-            "rules": [{"rule_id": "NW-LOCAL-RULE-S6", "rule_type": "STATE_CHANGE",
+            "rules": [{"rule_id": "NW-LOCAL-RULE-S6", "external_id": "S6_DOOR_OPEN", "rule_type": "STATE_CHANGE",
                 "scope_type": "Device", "scope_ref": "NW-LOCAL-DR001",
                 "event_type": "DOOR_OPENED", "open_limit_s": 300,
                 "business_start": "08:00:00", "business_end": "18:00:00",
@@ -240,24 +308,24 @@ class Dev1ConfigTests(unittest.TestCase):
                 "active": 1, "version": 3}]}
         with patch("integrations.dev1_config.apply_profile", side_effect=lambda c, d: d), \
              patch("integrations.dev1_config.apply_device", side_effect=lambda c, d: d), \
-             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d: d):
+             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d, **kw: d):
             rule = reconcile_device_config(ReverseCursor(), config)[2]
         self.assertEqual((rule["business_start"], rule["business_end"], rule["timezone"]),
                          ("08:00:00", "18:00:00", "Asia/Ho_Chi_Minh"))
 
     def test_s6_optional_schedule_and_profile_contradiction(self):
-        base = {"device": {"device_id": "NW-LOCAL-DR001", "device_profile": "NW-LOCAL-S6",
+        base = {"device": {"device_id": "NW-LOCAL-DR001", "external_id": "DR-001", "device_profile": "NW-LOCAL-S6",
             "site": "NW-LOCAL-SITE-001", "zone": None, "status": "Active",
             "connectivity_type": "WIFI", "config_version": 2},
             "site": {"organization": "NW-LOCAL-ORG-001"},
-            "profile": {"profile_code": "NW-LOCAL-S6", "version": 2, "protocol": "MQTT",
+            "profile": {"profile_code": "NW-LOCAL-S6", "external_id": "DOOR_SENSOR", "version": 2, "protocol": "MQTT",
                 "supports_telemetry": 1, "data_points": [{"code": "door_state"}], "event_types": []},
-            "rules": [{"rule_id": "NW-LOCAL-RULE-S6", "rule_type": "STATE_CHANGE",
+            "rules": [{"rule_id": "NW-LOCAL-RULE-S6", "external_id": "S6_DOOR_OPEN", "rule_type": "STATE_CHANGE",
                 "scope_type": "Device", "scope_ref": "NW-LOCAL-DR001",
                 "event_type": "DOOR_OPENED", "open_limit_s": 300, "version": 3}]}
         with patch("integrations.dev1_config.apply_profile", side_effect=lambda c, d: d), \
              patch("integrations.dev1_config.apply_device", side_effect=lambda c, d: d), \
-             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d: d):
+             patch("integrations.dev1_config.apply_rule", side_effect=lambda c, d, **kw: d):
             rule = reconcile_device_config(ReverseCursor(), base)[2]
         self.assertEqual((rule["business_start"], rule["business_end"], rule["timezone"]),
                          (None, None, None))

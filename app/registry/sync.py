@@ -113,9 +113,61 @@ def apply_device(cur,data):
     return sync_response(device,data["version"])
 
 
-def apply_rule(cur,data):
+def _sync_confirmed_rule_mapping(cur, rule_code, version, expected_external_id=None,
+                                 system_code="nextgrp"):
+    """Advance an existing confirmed mapping and preserve its immutable version.
+
+    IF-03 carries Dev 2 IDs, so it may advance only a mapping that an operator
+    already confirmed.  Snapshot reconciliation may additionally assert the
+    nextGRP ID returned by get_device_config.  This function never creates a
+    current mapping.
+    """
+    cur.execute("""SELECT external_id,config_version FROM integration_identity_mappings
+        WHERE system_code=%s AND entity_type='RULE' AND internal_id=%s
+          AND confirmed=TRUE AND enabled=TRUE FOR UPDATE""", (system_code, rule_code))
+    row=cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=409, detail={"code":"MAPPING_NOT_CONFIRMED",
+                                                     "resource_id":rule_code})
+    external_id,current_version=row
+    if expected_external_id is not None and external_id != expected_external_id:
+        raise HTTPException(status_code=409, detail={"code":"MAPPING_IDENTITY_CONFLICT",
+                                                     "resource_id":rule_code})
+    if current_version > version:
+        raise HTTPException(status_code=409, detail={"code":"MAPPING_VERSION_AHEAD",
+                                                     "applied_version":current_version})
+    identity={"system_code":system_code,"entity_type":"RULE","internal_id":rule_code,
+              "external_id":external_id,"config_version":version}
+    cur.execute("""INSERT INTO integration_identity_mapping_versions
+        (system_code,entity_type,internal_id,external_id,config_version,identity_hash)
+        VALUES(%s,'RULE',%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+        (system_code,rule_code,external_id,version,payload_hash(identity)))
+    cur.execute("""UPDATE integration_identity_mappings SET config_version=%s,
+        updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+        WHERE system_code=%s AND entity_type='RULE' AND internal_id=%s""",
+        (version,system_code,rule_code))
+    return external_id
+
+
+def apply_rule(cur,data, *, sync_mapping=False, mapping_external_id=None):
     digest=payload_hash(data); code=data["rule_id"]; scope=data["scope"]
     decision=version_decision(cur,"rule_definitions","rule_code=%s",(code,),data["version"],digest)
+    cur.execute("SELECT rule_kind, metric, event_type FROM rule_definitions WHERE rule_code=%s", (code,))
+    existing = cur.fetchone()
+    if existing:
+        ex_kind, ex_metric, ex_event = existing
+        if ex_kind != data["rule_kind"]:
+            raise HTTPException(status_code=409, detail={"code": "BUSINESS_RULE_MISMATCH",
+                                                         "resource_id": code,
+                                                         "reason": f"rule_kind mismatch: existing {ex_kind} != new {data['rule_kind']}"})
+        if data["rule_kind"] == "THRESHOLD" and ex_metric and data.get("metric") and ex_metric != data.get("metric"):
+            raise HTTPException(status_code=409, detail={"code": "BUSINESS_RULE_MISMATCH",
+                                                         "resource_id": code,
+                                                         "reason": f"metric mismatch: existing {ex_metric} != new {data.get('metric')}"})
+        if data["rule_kind"] == "STATE_CHANGE" and ex_event and data.get("event_type") and ex_event != data.get("event_type"):
+            raise HTTPException(status_code=409, detail={"code": "BUSINESS_RULE_MISMATCH",
+                                                         "resource_id": code,
+                                                         "reason": f"event_type mismatch: existing {ex_event} != new {data.get('event_type')}"})
     org=data["org_code"]
     st=scope["type"]
     device=scope.get("device_id") if st=="DEVICE" else None
@@ -146,6 +198,8 @@ def apply_rule(cur,data):
        data.get("quiet_window_s",0),severity,data["enabled"],data.get("business_start"),data.get("business_end"),
        data.get("timezone"),st,org if st in ("ORGANIZATION","SITE","ZONE") else scope.get("org_code"),
        scope.get("site_code"),scope.get("zone_code"),scope.get("profile_code"),data["version"],digest,Jsonb(cfg)))
+    if sync_mapping:
+        _sync_confirmed_rule_mapping(cur,code,data["version"],mapping_external_id)
     # A same-version/same-hash replay is also reconciliation: restore derived
     # columns if an old bootstrap migration or operational drift changed them.
     return sync_response(code,data["version"],decision=="duplicate")

@@ -98,14 +98,22 @@ class OutboxStore:
                       AND approval_device_map.entity_type='DEVICE'
                       AND approval_device_map.internal_id=approval_occ.device_id
                       AND approval_device_map.confirmed=TRUE AND approval_device_map.enabled=TRUE)""",
-                """EXISTS (SELECT 1 FROM integration_identity_mappings approval_rule_map
+                """(EXISTS (SELECT 1 FROM integration_identity_mapping_versions approval_rule_map
                     WHERE approval_rule_map.system_code='nextgrp'
                       AND approval_rule_map.entity_type='RULE'
                       AND approval_rule_map.internal_id=approval_occ.rule_code
                       AND approval_rule_map.config_version=CASE
                           WHEN approval_occ.payload_json->>'rule_version' ~ '^[0-9]+$'
+                          THEN (approval_occ.payload_json->>'rule_version')::integer ELSE -1 END)
+                   OR EXISTS (SELECT 1 FROM integration_identity_mappings approval_rule_current
+                    WHERE approval_rule_current.system_code='nextgrp'
+                      AND approval_rule_current.entity_type='RULE'
+                      AND approval_rule_current.internal_id=approval_occ.rule_code
+                      AND approval_rule_current.config_version=CASE
+                          WHEN approval_occ.payload_json->>'rule_version' ~ '^[0-9]+$'
                           THEN (approval_occ.payload_json->>'rule_version')::integer ELSE -1 END
-                      AND approval_rule_map.confirmed=TRUE AND approval_rule_map.enabled=TRUE)"""]
+                      AND approval_rule_current.confirmed=TRUE
+                      AND approval_rule_current.enabled=TRUE))"""]
             if self.approved_org:
                 approval.append("approval_device.org_code=%s")
                 params.append(self.approved_org)
@@ -365,6 +373,19 @@ def armed_e2e_selector():
             "org": org, "devices": devices, "rules": rules}
 
 
+def require_frappe_delivery_guard(adapter, fixed_selector, armed_selector):
+    """Refuse unbounded production Alarm delivery.
+
+    OUTBOX_DELIVERY_ENABLED is only the transport master switch.  A real
+    Frappe worker additionally needs either an exact one-shot approval list or
+    a durable high-water/time/scope window.  This prevents an image rollout
+    from making historical PENDING/FAILED rows newly eligible.
+    """
+    if isinstance(adapter, FrappeAlarmAdapter) and not (fixed_selector or armed_selector):
+        raise ValueError(
+            "Frappe Alarm delivery requires IF05_APPROVED_OUTBOX_IDS or an armed high-water scope")
+
+
 def main():
     if not _env_bool("OUTBOX_DELIVERY_ENABLED"):
         raise SystemExit("OUTBOX_DELIVERY_ENABLED is false; refusing external delivery")
@@ -378,6 +399,7 @@ def main():
                            _env_bool("NEXTGRP_ALLOW_INSECURE_MOCK"))
     adapter = alarm_adapter(mode, alarm_url, token,
         float(os.getenv("BRIDGE_TIMEOUT_SECONDS", "5")), allow_http)
+    require_frappe_delivery_guard(adapter, selector, armed)
     payload_transform = None
     if isinstance(adapter, FrappeAlarmAdapter):
         def payload_transform(payload):

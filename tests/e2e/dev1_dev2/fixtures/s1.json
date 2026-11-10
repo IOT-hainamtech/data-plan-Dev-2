@@ -3,6 +3,7 @@
   "config": {
     "device": {
       "device_id": "NW-IT-TH001",
+      "external_id": "TH-001",
       "site": "NW-LOCAL-SITE-001",
       "zone": null,
       "status": "Active",
@@ -11,7 +12,8 @@
     },
     "site": {"organization": "NW-LOCAL-ORG-001"},
     "profile": {
-      "profile_code": "NW-IT-S1",
+      "profile_code": "NW-LOCAL-S1",
+      "external_id": "TEMP_HUM_SENSOR",
       "version": 1,
       "supports_telemetry": true,
       "data_points": [
@@ -22,6 +24,7 @@
     },
     "rules": [{
       "rule_id": "NW-IT-RULE-S1",
+      "external_id": "S1_TEMP_HIGH",
       "version": 1,
       "rule_type": "THRESHOLD",
       "scope_type": "Device",
@@ -29,7 +32,7 @@
       "data_point": "temperature",
       "operator": ">",
       "threshold": 30.0,
-      "active": true
+      "active": 1
     }]
   },
   "status": {

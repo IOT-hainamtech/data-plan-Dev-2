@@ -40,6 +40,14 @@ class Dev1V13IntegrationTests(unittest.TestCase):
         cls.rule_body=copy.deepcopy(examples["09_rule_s1"]);cls.rule_body.update(rule_id=cls.rule,org_code=cls.org)
         cls.rule_body["scope"]["ref"]=cls.device
         cls.alarm_state_body=copy.deepcopy(examples["14_alarm_state"]);cls.alarm_state_body["org_code"]=cls.org
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO integration_identity_mappings
+                    (system_code,entity_type,internal_id,external_id,config_version,confirmed,enabled)
+                    VALUES('nextgrp','RULE',%s,%s,0,TRUE,TRUE)
+                    ON CONFLICT(system_code,entity_type,internal_id) DO NOTHING""",
+                    (cls.rule,f"NW-{cls.rule}"))
+            conn.commit()
 
     @classmethod
     def tearDownClass(cls):
@@ -50,6 +58,8 @@ class Dev1V13IntegrationTests(unittest.TestCase):
                 cur.execute("DELETE FROM alarm_occurrences WHERE device_id=%s",(cls.device,))
                 cur.execute("DELETE FROM alarm_episode_mappings WHERE device_id=%s",(cls.device,))
                 cur.execute("DELETE FROM rule_runtime_state WHERE rule_code=%s",(cls.rule,))
+                cur.execute("DELETE FROM integration_identity_mapping_versions WHERE entity_type='RULE' AND internal_id=%s",(cls.rule,))
+                cur.execute("DELETE FROM integration_identity_mappings WHERE entity_type='RULE' AND internal_id=%s",(cls.rule,))
                 cur.execute("DELETE FROM rule_definitions WHERE rule_code=%s",(cls.rule,))
                 cur.execute("DELETE FROM status_outbox WHERE device_id=%s",(cls.device,))
                 cur.execute("DELETE FROM devices WHERE device_id=%s",(cls.device,))

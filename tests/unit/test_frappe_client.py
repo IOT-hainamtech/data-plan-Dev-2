@@ -4,7 +4,7 @@ import unittest
 import urllib.error
 import urllib.parse
 
-from integrations.frappe_client import (METHOD_PREFIX, FrappeClient,
+from integrations.frappe_client import (DEFAULT_DEVICE_EVENT_METHOD, METHOD_PREFIX, FrappeClient,
                                          FrappeHTTPError,
                                          validate_and_normalize_credentials)
 
@@ -138,10 +138,27 @@ class FrappeClientTests(unittest.TestCase):
                  "door_state": "open", "data_status": "LIVE"}
         client.post_device_event(event)
         event_request = recorder.requests[-1][0]
-        self.assertIn(METHOD_PREFIX + "device_event_controller.receive_device_event",
+        self.assertIn("/api/method/" + DEFAULT_DEVICE_EVENT_METHOD,
                       event_request.full_url)
         self.assertEqual(json.loads(event_request.data), event)
         self.assertEqual(event_request.get_header("X-org-code"), "hainam")
+
+    def test_device_event_method_can_be_configured_without_changing_other_methods(self):
+        recorder = Recorder(Response(200, {"message": {"accepted": True}}))
+        method = "example_app.api.receive_device_event"
+        client = self.client(recorder, device_event_method=method)
+        client.post_device_event({"device_id": "NW-IT-DR001", "event_id": "evt-2",
+                                  "event_type": "DOOR_CLOSED",
+                                  "event_at": "2026-11-07T10:00:00+07:00",
+                                  "door_state": "closed", "data_status": "LIVE"})
+        self.assertIn("/api/method/" + method, recorder.requests[-1][0].full_url)
+        client.post_status("NW-IT-DR001", "online")
+        self.assertIn(METHOD_PREFIX + "status_controller.receive_status",
+                      recorder.requests[-1][0].full_url)
+
+    def test_device_event_method_rejects_url_injection(self):
+        with self.assertRaisesRegex(ValueError, "method is invalid"):
+            self.client(Recorder(), device_event_method="bad.method?token=secret")
 
     # -------------------------------------------------------------------------
     # POST Alarm

@@ -22,14 +22,15 @@ class OccurrenceCursor:
         self.rowcount = 0
         if normalized.startswith("INSERT INTO alarm_episode_mappings"):
             if self.mapping is None:
-                self.mapping = (params[1], params[2])
+                self.mapping = (params[1], params[2], params[5], params[6],
+                                getattr(params[7], "obj", params[7]), "FROZEN")
             self.rowcount = 1
         elif normalized.startswith("SELECT wire_alarm_key"):
             self.result = self.mapping
         elif normalized.startswith("SELECT count(*) FROM alarm_occurrences"):
             self.result = (self.occurrence_count,)
-        elif normalized.startswith("SELECT d.org_code"):
-            self.result = ("org", "zone", self.rule_version)
+        elif normalized.startswith("SELECT org_code"):
+            self.result = ("org", "zone")
         elif normalized.startswith("INSERT INTO alarm_occurrences"):
             self.occurrence_payload = getattr(params[-1], "obj", params[-1])
             self.rowcount = 1
@@ -155,11 +156,16 @@ class AlarmContractTests(unittest.TestCase):
         self.episode = "ep:S6:one"
 
     def write(self, cursor, kind, observed):
+        snapshot={"version":cursor.rule_version,"payload_hash":"a" * 64,
+                  "identity":{"external_rule_id":"NW-IT-RULE-S6",
+                              "external_device_id":"NW-IT-DR001"},
+                  "provenance":"FROZEN"}
         return _write_occurrence(cursor, rule_code="S6_DOOR_OPEN", device_id="DR-001",
             severity="WARNING", occurrence_kind=kind, observed_at=observed,
             episode_key=self.episode, episode_started_at=self.triggered,
             event_type="DOOR_OPENED" if kind == "TRIGGERED" else "DOOR_CLOSED",
-            details={"device_event_id": f"source-{kind.lower()}"})
+            details={"device_event_id": f"source-{kind.lower()}"},
+            rule_snapshot=snapshot if kind == "TRIGGERED" else None)
 
     def test_trigger_and_clear_share_wire_key_with_contiguous_sequence(self):
         cursor = OccurrenceCursor(rule_version=7)

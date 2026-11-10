@@ -1,5 +1,6 @@
 """Durable M1 S1/S6 rule state machines using the caller's DB transaction."""
 import hashlib
+import json
 import uuid
 from datetime import timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -13,6 +14,70 @@ def _key(*parts):
 
 def _alarm_key(rule_code, device_id, source_key, occurrence_kind="TRIGGERED"):
     return f"m1:{rule_code}:{_key(rule_code, device_id, source_key, occurrence_kind)}"
+
+
+def _freeze_rule_snapshot(cur, rule_code, device_id):
+    """Capture immutable Rule configuration and confirmed integration identity."""
+    cur.execute("""SELECT config_version,payload_hash,config_json,severity,
+            threshold_value,hysteresis_value,hold_seconds,clear_hold_seconds,
+            quiet_seconds,business_start,business_end,schedule_timezone
+        FROM rule_definitions WHERE rule_code=%s""", (rule_code,))
+    row=cur.fetchone()
+    if not row:
+        raise ValueError("cannot freeze a missing Rule")
+    (version,digest,config,severity,threshold,hysteresis,hold_s,clear_s,quiet_s,
+     business_start,business_end,schedule_timezone)=row
+    if not isinstance(version,int) or version < 0:
+        raise ValueError("Rule has no trustworthy version provenance")
+    identity={"rule_id":rule_code,"device_id":device_id}
+    for entity,key,value in (("RULE","external_rule_id",rule_code),
+                             ("DEVICE","external_device_id",device_id)):
+        cur.execute("""SELECT external_id,config_version FROM integration_identity_mappings
+            WHERE system_code='nextgrp' AND entity_type=%s AND internal_id=%s
+              AND confirmed=TRUE AND enabled=TRUE""", (entity,value))
+        mapped=cur.fetchone()
+        if mapped:
+            identity[key],identity[f"{entity.lower()}_mapping_version"]=mapped
+    cur.execute("SELECT org_code FROM devices WHERE device_id=%s",(device_id,))
+    device_org=cur.fetchone()
+    if device_org:
+        identity["org_code"]=device_org[0]
+        cur.execute("""SELECT external_id,config_version FROM integration_identity_mappings
+            WHERE system_code='nextgrp' AND entity_type='ORGANIZATION' AND internal_id=%s
+              AND confirmed=TRUE AND enabled=TRUE""",(device_org[0],))
+        mapped_org=cur.fetchone()
+        if mapped_org:
+            identity["external_org_code"],identity["organization_mapping_version"]=mapped_org
+    frozen_config={**(config or {}),"severity":severity,"threshold":threshold,
+        "hysteresis":hysteresis,"hold_seconds":hold_s,"clear_hold_seconds":clear_s,
+        "quiet_seconds":quiet_s,"business_start":business_start.isoformat() if business_start else None,
+        "business_end":business_end.isoformat() if business_end else None,
+        "schedule_timezone":schedule_timezone}
+    # Bootstrap version 0 predates payload_hash. It is still a concrete local
+    # Rule definition, so freeze a deterministic digest of exactly what was
+    # observed; never infer a different version.
+    if not digest:
+        digest=hashlib.sha256(json.dumps(frozen_config,sort_keys=True,
+            separators=(",",":"),default=str).encode()).hexdigest()
+    return {"version":version,"payload_hash":digest,"config":frozen_config,
+            "identity":identity,"provenance":"FROZEN"}
+
+
+def _save_frozen_snapshot(cur, rule_code, device_id, snapshot):
+    cur.execute("""UPDATE rule_runtime_state SET frozen_rule_version=%s,
+        frozen_rule_payload_hash=%s,frozen_rule_config_json=%s,frozen_identity_json=%s,
+        episode_provenance='FROZEN' WHERE rule_code=%s AND device_id=%s""",
+        (snapshot["version"],snapshot["payload_hash"],Jsonb(snapshot["config"]),
+         Jsonb(snapshot["identity"]),rule_code,device_id))
+
+
+def _runtime_snapshot(version,digest,config,identity,provenance):
+    if provenance == "LEGACY":
+        return None
+    if provenance != "FROZEN" or version is None or config is None:
+        return None
+    return {"version":version,"payload_hash":digest,"config":config,
+            "identity":identity or {},"provenance":provenance}
 
 
 def _manually_closed_uncleared_episode(cur, rule_code, device_id):
@@ -84,21 +149,32 @@ def door_should_fire(*, opened_at, now, hold_seconds, business_start,
 
 
 def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
-                      observed_at, episode_key, event_type, details, episode_started_at=None):
+                      observed_at, episode_key, event_type, details, episode_started_at=None,
+                      rule_snapshot=None):
     alarm_key = _alarm_key(rule_code, device_id, episode_key, occurrence_kind)
     if occurrence_kind == "TRIGGERED":
         started = episode_started_at or observed_at
         wire_alarm_key = f"{rule_code}:{device_id}:{int(started.replace(tzinfo=timezone.utc).timestamp())}"
+        if not rule_snapshot or rule_snapshot.get("provenance") != "FROZEN":
+            raise ValueError("refusing occurrence without frozen Rule provenance")
         cur.execute("""INSERT INTO alarm_episode_mappings
-            (internal_episode_key,wire_alarm_key,episode_started_at,rule_code,device_id)
-            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(internal_episode_key) DO NOTHING""",
-            (episode_key,wire_alarm_key,started,rule_code,device_id))
-    cur.execute("""SELECT wire_alarm_key,episode_started_at FROM alarm_episode_mappings
+            (internal_episode_key,wire_alarm_key,episode_started_at,rule_code,device_id,
+             frozen_rule_version,frozen_rule_payload_hash,frozen_identity_json,episode_provenance)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'FROZEN')
+            ON CONFLICT(internal_episode_key) DO NOTHING""",
+            (episode_key,wire_alarm_key,started,rule_code,device_id,
+             rule_snapshot["version"],rule_snapshot["payload_hash"],
+             Jsonb(rule_snapshot.get("identity") or {})))
+    cur.execute("""SELECT wire_alarm_key,episode_started_at,frozen_rule_version,
+            frozen_rule_payload_hash,frozen_identity_json,episode_provenance
+        FROM alarm_episode_mappings
         WHERE internal_episode_key=%s FOR UPDATE""", (episode_key,))
     mapping=cur.fetchone()
     if mapping is None:
         raise ValueError("alarm episode mapping is missing; refusing out-of-order occurrence")
-    wire_alarm_key,episode_started=mapping
+    wire_alarm_key,episode_started,rule_version,rule_digest,frozen_identity,provenance=mapping
+    if provenance != "FROZEN" or rule_version is None:
+        raise ValueError("legacy episode has no trustworthy Rule provenance")
     cur.execute("SELECT count(*) FROM alarm_occurrences WHERE episode_key=%s", (episode_key,))
     occurrence_seq=int(cur.fetchone()[0]) + 1
     delivery_event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"nextwireless:{alarm_key}"))
@@ -114,13 +190,11 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
                .get((rule_code.split("_")[0], occurrence_kind),
                     f"{mapped_event} on {device_id}"))
     details = {**details, "summary": summary}
-    cur.execute("""SELECT d.org_code,d.zone_code,r.config_version
-        FROM devices d JOIN rule_definitions r ON r.rule_code=%s WHERE d.device_id=%s""",
-        (rule_code,device_id))
+    cur.execute("SELECT org_code,zone_code FROM devices WHERE device_id=%s",(device_id,))
     registry=cur.fetchone()
     if registry is None:
         raise ValueError("alarm device/rule registry entry is missing")
-    org_code,zone_code,rule_version=registry
+    org_code,zone_code=registry
     if not isinstance(rule_version, int) or rule_version < 0:
         raise ValueError("rule config_version is missing or invalid")
     severity_wire={"INFO":"Low","WARNING":"Medium","HIGH":"High","CRITICAL":"Critical"}.get(severity,severity)
@@ -153,13 +227,16 @@ def _write_occurrence(cur, *, rule_code, device_id, severity, occurrence_kind,
 
 def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
     cur.execute(f"""SELECT r.rule_code,r.threshold_value,r.hysteresis_value,r.hold_seconds,
-            r.clear_hold_seconds,r.quiet_seconds,r.severity,v.telemetry_interval_seconds
-            FROM rule_definitions r
-            CROSS JOIN devices v WHERE v.device_id=%s AND r.rule_kind='THRESHOLD'
-            AND r.metric=%s AND r.enabled=TRUE AND {SCOPE_MATCH}
+            r.clear_hold_seconds,r.quiet_seconds,r.severity,v.telemetry_interval_seconds,r.enabled
+            FROM rule_definitions r CROSS JOIN devices v
+            LEFT JOIN rule_runtime_state s0 ON s0.rule_code=r.rule_code AND s0.device_id=v.device_id
+            WHERE v.device_id=%s AND r.rule_kind='THRESHOLD' AND r.metric=%s
+            AND (r.enabled=TRUE OR s0.episode_key IS NOT NULL OR s0.hold_started_at IS NOT NULL
+                 OR s0.is_active=TRUE) AND {SCOPE_MATCH}
             ORDER BY r.rule_code""", (device_id, metric))
     alarms = 0
-    for rule_code, threshold, hysteresis, hold_s, clear_s, quiet_s, severity, interval_s in cur.fetchall():
+    for (rule_code, threshold, hysteresis, hold_s, clear_s, quiet_s, severity,
+         interval_s, enabled) in cur.fetchall():
         if threshold is None or hysteresis < 0:
             continue
         # Persist delayed data, but never let a future/stale device timestamp
@@ -170,9 +247,26 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
         cur.execute("""INSERT INTO rule_runtime_state(rule_code,device_id)
             VALUES (%s,%s) ON CONFLICT (rule_code,device_id) DO NOTHING""", (rule_code, device_id))
         cur.execute("""SELECT hold_started_at,recovery_started_at,is_active,last_sample_at,
-                last_fired_at,episode_key,episode_started_at FROM rule_runtime_state
+                last_fired_at,episode_key,episode_started_at,frozen_rule_version,
+                frozen_rule_payload_hash,frozen_rule_config_json,frozen_identity_json,
+                episode_provenance FROM rule_runtime_state
                 WHERE rule_code=%s AND device_id=%s FOR UPDATE""", (rule_code, device_id))
-        hold_start, recovery, active, last_sample, last_fired, episode, episode_started = cur.fetchone()
+        (hold_start,recovery,active,last_sample,last_fired,episode,episode_started,
+         frozen_version,frozen_digest,frozen_config,frozen_identity,provenance)=cur.fetchone()
+        if provenance == "LEGACY":
+            continue
+        snapshot=_runtime_snapshot(frozen_version,frozen_digest,frozen_config,
+                                   frozen_identity,provenance)
+        if snapshot:
+            cfg=snapshot["config"]
+            threshold=cfg.get("threshold",threshold)
+            hysteresis=cfg.get("hysteresis",hysteresis)
+            hold_s=cfg.get("hold_seconds",hold_s)
+            clear_s=cfg.get("clear_hold_seconds",clear_s)
+            quiet_s=cfg.get("quiet_seconds",quiet_s)
+            severity=cfg.get("severity",severity)
+        elif not enabled:
+            continue
         if last_sample is not None and measured_at <= last_sample:
             continue
         # A gap longer than two configured samples breaks a continuous hold.
@@ -181,6 +275,11 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
                 hold_start = measured_at
             if active and recovery is not None:
                 recovery = measured_at
+        if not snapshot and not active and value > threshold:
+            snapshot=_freeze_rule_snapshot(cur,rule_code,device_id)
+            _save_frozen_snapshot(cur,rule_code,device_id,snapshot)
+            episode=f"ep:{rule_code}:{_key(device_id,metric,measured_at)}"
+            episode_started=measured_at
         next_hold, next_recovery, next_active, transition = threshold_transition(
             value=value, threshold=float(threshold), hysteresis=float(hysteresis),
             hold_seconds=int(hold_s), clear_hold_seconds=int(clear_s), observed_at=measured_at,
@@ -193,15 +292,16 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
                 next_active = True
                 next_hold = None
             elif allowed:
-                episode = f"ep:{rule_code}:{_key(device_id, metric, hold_start or measured_at)}"
-                episode_started = hold_start or measured_at
+                episode = episode or f"ep:{rule_code}:{_key(device_id, metric, hold_start or measured_at)}"
+                episode_started = episode_started or hold_start or measured_at
                 alarms += int(_write_occurrence(
                     cur, rule_code=rule_code, device_id=device_id, severity=severity,
                     occurrence_kind="TRIGGERED", observed_at=received_at, episode_key=episode,
                     episode_started_at=episode_started,
                     event_type="THRESHOLD_EXCEEDED",
                     details={"metric": metric, "value": value, "threshold": threshold,
-                             "hold_seconds": hold_s, "hysteresis": hysteresis}))
+                             "hold_seconds": hold_s, "hysteresis": hysteresis},
+                    rule_snapshot=snapshot))
                 last_fired = measured_at
             else:
                 next_active = False
@@ -216,11 +316,23 @@ def on_telemetry(cur, *, device_id, metric, value, measured_at, received_at):
                          "recovery_threshold": float(threshold) - float(hysteresis),
                          "clear_hold_seconds": clear_s}))
             episode = episode_started = None
+            snapshot = None
+        if not next_active and next_hold is None and episode is not None and value <= threshold:
+            episode=episode_started=None
+            snapshot=None
+        clear_snapshot = snapshot is None and episode is None
         cur.execute("""UPDATE rule_runtime_state SET hold_started_at=%s,recovery_started_at=%s,
                 is_active=%s,last_sample_at=%s,last_fired_at=%s,episode_key=%s,
-                episode_started_at=%s WHERE rule_code=%s AND device_id=%s""",
+                episode_started_at=%s,
+                frozen_rule_version=CASE WHEN %s THEN NULL ELSE frozen_rule_version END,
+                frozen_rule_payload_hash=CASE WHEN %s THEN NULL ELSE frozen_rule_payload_hash END,
+                frozen_rule_config_json=CASE WHEN %s THEN NULL ELSE frozen_rule_config_json END,
+                frozen_identity_json=CASE WHEN %s THEN NULL ELSE frozen_identity_json END,
+                episode_provenance=CASE WHEN %s THEN NULL ELSE episode_provenance END
+                WHERE rule_code=%s AND device_id=%s""",
                 (next_hold, next_recovery, next_active, measured_at, last_fired, episode,
-                 episode_started, rule_code, device_id))
+                 episode_started,clear_snapshot,clear_snapshot,clear_snapshot,clear_snapshot,
+                 clear_snapshot,rule_code,device_id))
     return alarms
 
 
@@ -228,23 +340,37 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
              observed_at=None):
     observed_at = observed_at or received_at
     cur.execute(f"""SELECT r.rule_code,r.severity,r.hold_seconds,r.clear_hold_seconds,r.quiet_seconds,
-            r.business_start,r.business_end,r.schedule_timezone FROM rule_definitions r
-            CROSS JOIN devices v WHERE v.device_id=%s AND r.rule_kind='STATE_CHANGE'
-              AND r.enabled=TRUE AND r.event_type='DOOR_OPENED' AND {SCOPE_MATCH}
+            r.business_start,r.business_end,r.schedule_timezone,r.enabled FROM rule_definitions r
+            CROSS JOIN devices v
+            LEFT JOIN rule_runtime_state s0 ON s0.rule_code=r.rule_code AND s0.device_id=v.device_id
+            WHERE v.device_id=%s AND r.rule_kind='STATE_CHANGE'
+              AND (r.enabled=TRUE OR s0.episode_key IS NOT NULL OR s0.current_state='open'
+                   OR s0.is_active=TRUE) AND r.event_type='DOOR_OPENED' AND {SCOPE_MATCH}
             ORDER BY r.rule_code""", (device_id,))
     changes = 0
-    for rule_code, severity, hold_s, clear_s, quiet_s, start, end, tz_name in cur.fetchall():
+    for rule_code,severity,hold_s,clear_s,quiet_s,start,end,tz_name,enabled in cur.fetchall():
         cur.execute("""INSERT INTO rule_runtime_state(rule_code,device_id)
             VALUES (%s,%s) ON CONFLICT (rule_code,device_id) DO NOTHING""", (rule_code, device_id))
         cur.execute("""SELECT current_state,state_changed_at,is_active,last_fired_at,episode_key,
-            source_event_id FROM rule_runtime_state WHERE rule_code=%s AND device_id=%s FOR UPDATE""",
+            source_event_id,frozen_rule_version,frozen_rule_payload_hash,frozen_rule_config_json,
+            frozen_identity_json,episode_provenance FROM rule_runtime_state
+            WHERE rule_code=%s AND device_id=%s FOR UPDATE""",
             (rule_code, device_id))
-        state, changed_at, active, last_fired, episode, source_event = cur.fetchone()
+        (state,changed_at,active,last_fired,episode,source_event,frozen_version,
+         frozen_digest,frozen_config,frozen_identity,provenance)=cur.fetchone()
+        snapshot=_runtime_snapshot(frozen_version,frozen_digest,frozen_config,
+                                   frozen_identity,provenance)
+        if snapshot:
+            cfg=snapshot["config"]
+            severity=cfg.get("severity",severity); hold_s=cfg.get("hold_seconds",hold_s)
+            clear_s=cfg.get("clear_hold_seconds",clear_s); quiet_s=cfg.get("quiet_seconds",quiet_s)
         if changed_at is not None and observed_at <= changed_at:
             continue
         if event_type == "DOOR_OPENED":
-            if state == "open":
+            if state == "open" or not enabled:
                 continue
+            snapshot=_freeze_rule_snapshot(cur,rule_code,device_id)
+            _save_frozen_snapshot(cur,rule_code,device_id,snapshot)
             episode = f"ep:{rule_code}:{_key(device_id, event_id)}"
             cur.execute("""UPDATE rule_runtime_state SET current_state='open',state_changed_at=%s,
                 source_event_id=%s,episode_key=%s,episode_started_at=%s,recovery_started_at=NULL
@@ -257,33 +383,51 @@ def on_event(cur, *, device_id, event_id, event_type, received_at, payload,
         elif event_type == "DOOR_CLOSED":
             if state != "open":
                 continue
-            if active and episode and clear_s == 0:
+            if provenance == "LEGACY":
+                active=False
+            if active and episode and clear_s == 0 and snapshot:
                 changes += int(_write_occurrence(
                     cur, rule_code=rule_code, device_id=device_id, severity=severity,
                     occurrence_kind="CLEARED", observed_at=received_at, episode_key=episode,
                     event_type="DOOR_CLOSED", details={"device_event_id": event_id,
                     "clear_hold_seconds": clear_s}))
             keep_episode = bool(active and episode and clear_s > 0)
+            clear_snapshot=not keep_episode
             cur.execute("""UPDATE rule_runtime_state SET current_state='closed',state_changed_at=%s,
                 source_event_id=%s,is_active=%s,episode_key=%s,
                 episode_started_at=CASE WHEN %s THEN episode_started_at ELSE NULL END,
-                recovery_started_at=%s WHERE rule_code=%s AND device_id=%s""",
+                recovery_started_at=%s,
+                frozen_rule_version=CASE WHEN %s THEN NULL ELSE frozen_rule_version END,
+                frozen_rule_payload_hash=CASE WHEN %s THEN NULL ELSE frozen_rule_payload_hash END,
+                frozen_rule_config_json=CASE WHEN %s THEN NULL ELSE frozen_rule_config_json END,
+                frozen_identity_json=CASE WHEN %s THEN NULL ELSE frozen_identity_json END,
+                episode_provenance=CASE WHEN %s THEN NULL ELSE episode_provenance END
+                WHERE rule_code=%s AND device_id=%s""",
                 (observed_at, event_id, keep_episode, episode if keep_episode else None,
-                 keep_episode, received_at if keep_episode else None, rule_code, device_id))
+                 keep_episode, received_at if keep_episode else None,clear_snapshot,clear_snapshot,
+                 clear_snapshot,clear_snapshot,clear_snapshot,rule_code,device_id))
     return changes + evaluate_due_rules(cur, received_at, device_id=device_id)
 
 
 def evaluate_due_rules(cur, now, device_id=None):
     # Complete configured delayed door clears first.
     cur.execute("""SELECT d.rule_code,s.device_id,d.severity,d.clear_hold_seconds,
-            s.recovery_started_at,s.episode_key,s.source_event_id
+            s.recovery_started_at,s.episode_key,s.source_event_id,s.frozen_rule_version,
+            s.frozen_rule_payload_hash,s.frozen_rule_config_json,s.frozen_identity_json,
+            s.episode_provenance
         FROM rule_definitions d JOIN rule_runtime_state s
           ON s.rule_code=d.rule_code
-        WHERE d.enabled=TRUE AND d.rule_kind='STATE_CHANGE' AND s.current_state='closed'
+        WHERE d.rule_kind='STATE_CHANGE' AND s.current_state='closed'
           AND s.is_active=TRUE AND s.recovery_started_at IS NOT NULL
           AND (%s::text IS NULL OR s.device_id=%s) FOR UPDATE OF s""", (device_id, device_id))
     fired = 0
-    for code, dev, severity, clear_s, recovery, episode, source_event in cur.fetchall():
+    for (code,dev,severity,clear_s,recovery,episode,source_event,frozen_version,
+         frozen_digest,frozen_config,frozen_identity,provenance) in cur.fetchall():
+        snapshot=_runtime_snapshot(frozen_version,frozen_digest,frozen_config,frozen_identity,provenance)
+        if not snapshot:
+            continue
+        clear_s=snapshot["config"].get("clear_hold_seconds",clear_s)
+        severity=snapshot["config"].get("severity",severity)
         if (now - recovery).total_seconds() < clear_s:
             continue
         fired += int(_write_occurrence(
@@ -292,18 +436,37 @@ def evaluate_due_rules(cur, now, device_id=None):
             event_type="DOOR_CLOSED", details={"device_event_id": source_event,
             "clear_hold_seconds": clear_s}))
         cur.execute("""UPDATE rule_runtime_state SET is_active=FALSE,episode_key=NULL,
-            episode_started_at=NULL,recovery_started_at=NULL
+            episode_started_at=NULL,recovery_started_at=NULL,frozen_rule_version=NULL,
+            frozen_rule_payload_hash=NULL,frozen_rule_config_json=NULL,frozen_identity_json=NULL,
+            episode_provenance=NULL
             WHERE rule_code=%s AND device_id=%s""", (code, dev))
     cur.execute("""SELECT d.rule_code,s.device_id,d.severity,d.hold_seconds,d.quiet_seconds,
             d.business_start,d.business_end,d.schedule_timezone,s.state_changed_at,
-            s.episode_started_at,s.last_fired_at,s.episode_key,s.source_event_id
+            s.episode_started_at,s.last_fired_at,s.episode_key,s.source_event_id,
+            s.frozen_rule_version,s.frozen_rule_payload_hash,s.frozen_rule_config_json,
+            s.frozen_identity_json,s.episode_provenance
         FROM rule_definitions d JOIN rule_runtime_state s
           ON s.rule_code=d.rule_code
-        WHERE d.enabled=TRUE AND d.rule_kind='STATE_CHANGE' AND s.current_state='open'
+        WHERE d.rule_kind='STATE_CHANGE' AND s.current_state='open'
           AND s.is_active=FALSE AND (%s::text IS NULL OR s.device_id=%s)
         FOR UPDATE OF s""", (device_id, device_id))
-    for (code, dev, severity, hold_s, quiet_s, start, end, tz_name,
-         device_opened_at, timer_started_at, last_fired, episode, source_event) in cur.fetchall():
+    for (code,dev,severity,hold_s,quiet_s,start,end,tz_name,device_opened_at,
+         timer_started_at,last_fired,episode,source_event,frozen_version,frozen_digest,
+         frozen_config,frozen_identity,provenance) in cur.fetchall():
+        snapshot=_runtime_snapshot(frozen_version,frozen_digest,frozen_config,frozen_identity,provenance)
+        if not snapshot:
+            continue
+        cfg=snapshot["config"]
+        severity=cfg.get("severity",severity); hold_s=cfg.get("hold_seconds",hold_s)
+        quiet_s=cfg.get("quiet_seconds",quiet_s)
+        start=cfg.get("business_start"); end=cfg.get("business_end")
+        tz_name=cfg.get("schedule_timezone")
+        if isinstance(start,str):
+            from datetime import time as wall_time
+            start=wall_time.fromisoformat(start)
+        if isinstance(end,str):
+            from datetime import time as wall_time
+            end=wall_time.fromisoformat(end)
         if not all((timer_started_at, episode)):
             continue
         if not door_should_fire(opened_at=timer_started_at, now=now, hold_seconds=hold_s,
@@ -320,7 +483,8 @@ def evaluate_due_rules(cur, now, device_id=None):
             event_type="DOOR_OPEN_OUTSIDE_HOURS" if outside else "DOOR_OPEN_TOO_LONG",
             details={"device_event_id": source_event,
                      "opened_at": device_opened_at.isoformat() + "Z",
-                     "hold_seconds": hold_s, "schedule_timezone": tz_name})
+                     "hold_seconds": hold_s, "schedule_timezone": tz_name},
+            rule_snapshot=snapshot)
         cur.execute("""UPDATE rule_runtime_state SET is_active=TRUE,last_fired_at=%s
             WHERE rule_code=%s AND device_id=%s""", (now, code, dev))
         fired += int(created)
